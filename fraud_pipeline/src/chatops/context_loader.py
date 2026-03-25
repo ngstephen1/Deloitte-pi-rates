@@ -27,6 +27,8 @@ ACTIVE_BUNDLE_FILES = {
     "review_log": "review_log.csv",
     "anomaly_scores": "anomaly_scores.csv",
     "graph_features": "graph_features.csv",
+    "tda_features": "tda_features.csv",
+    "ai_review_recommendations": "ai_review_recommendations.csv",
 }
 
 
@@ -100,6 +102,8 @@ def load_report_bundle() -> Dict[str, Any]:
     ips = _safe_read_csv(config.RISK_IPS_FILE)
     anomaly_scores = _safe_read_csv(config.ANOMALY_SCORES_FILE)
     graph_features = _safe_read_csv(config.GRAPH_FEATURES_FILE)
+    tda_features = _safe_read_csv(config.TDA_FEATURES_FILE)
+    ai_review_recommendations = _safe_read_csv(config.AI_REVIEW_RECOMMENDATIONS_FILE)
     review_log = ReviewStore().get_all_decisions()
 
     if not transactions.empty:
@@ -133,6 +137,8 @@ def load_report_bundle() -> Dict[str, Any]:
     bundle["review_log"] = review_log
     bundle["anomaly_scores"] = anomaly_scores
     bundle["graph_features"] = graph_features
+    bundle["tda_features"] = tda_features
+    bundle["ai_review_recommendations"] = ai_review_recommendations
     bundle["source_label"] = "Pipeline outputs"
     bundle["uploaded_type"] = "pipeline_outputs"
     return bundle
@@ -159,7 +165,18 @@ def _bundle_from_active_dir(active_dir: Path) -> Dict[str, Any]:
             "uploaded_type": manifest.get("uploaded_type", "published_context"),
         }
 
-    for key in ["accounts", "merchants", "devices", "ips", "locations", "review_log", "anomaly_scores", "graph_features"]:
+    for key in [
+        "accounts",
+        "merchants",
+        "devices",
+        "ips",
+        "locations",
+        "review_log",
+        "anomaly_scores",
+        "graph_features",
+        "tda_features",
+        "ai_review_recommendations",
+    ]:
         if not data_frames[key].empty:
             bundle[key] = data_frames[key]
 

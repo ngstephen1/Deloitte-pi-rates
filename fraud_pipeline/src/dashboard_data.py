@@ -14,6 +14,7 @@ from .anomaly_detection import run_anomaly_detection
 from .graph_analysis import graph_analysis
 from .ingest_clean import clean_transactions_dataframe
 from .risk_scoring import risk_scoring
+from .tda_analysis import tda_analysis
 
 
 CSV_UPLOAD_OPTIONS = [
@@ -168,8 +169,9 @@ def bundle_from_transactions(transactions: pd.DataFrame, source_label: str) -> D
 def analyze_uploaded_raw_transactions(raw_df: pd.DataFrame, source_label: str) -> Dict[str, Any]:
     cleaned = clean_transactions_dataframe(raw_df.copy(), save_output=False)
     anomaly_scores = run_anomaly_detection(cleaned, save_output=False)
+    tda_features = tda_analysis(cleaned, save_output=False)
     graph_features, _ = graph_analysis(cleaned, save_output=False)
-    risk_results = risk_scoring(cleaned, anomaly_scores, graph_features, save_output=False)
+    risk_results = risk_scoring(cleaned, anomaly_scores, graph_features, tda_features, save_output=False)
     bundle = bundle_from_transactions(risk_results["transactions_ranked"], source_label)
     bundle["accounts"] = risk_results["accounts_ranked"]
     bundle["merchants"] = risk_results["merchants_ranked"]
@@ -184,6 +186,7 @@ def analyze_uploaded_raw_transactions(raw_df: pd.DataFrame, source_label: str) -
     )
     bundle["cleaned_transactions"] = cleaned
     bundle["anomaly_scores"] = anomaly_scores
+    bundle["tda_features"] = tda_features
     bundle["graph_features"] = graph_features
     bundle["source_label"] = source_label
     bundle["uploaded_type"] = "raw_transaction_dataset"

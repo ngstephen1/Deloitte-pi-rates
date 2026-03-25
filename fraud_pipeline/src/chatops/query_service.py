@@ -16,6 +16,7 @@ from ..ai_assistant import (
     build_deep_case_explanation,
     generate_multi_agent_oof_brief,
 )
+from ..review_judge import judge_case_disposition
 from .context_loader import build_review_summary, load_active_bundle
 
 
@@ -95,6 +96,15 @@ def _find_row(df: pd.DataFrame, column: str, value: str) -> Optional[Dict[str, A
     return matches.iloc[0].to_dict()
 
 
+def _append_judge_summary(answer: str, judgment: Dict[str, Any]) -> str:
+    return (
+        f"{answer}\n\n"
+        f"Suggested disposition: {judgment['decision']} ({judgment['confidence']} confidence).\n"
+        f"Judge rationale: {judgment['rationale']}\n"
+        + "\n".join(f"- {item}" for item in judgment.get("checks", [])[:3])
+    )
+
+
 def explain_transaction_case(transaction_id: str, bundle: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     active_bundle = bundle or load_active_bundle()
     transactions = active_bundle.get("transactions", pd.DataFrame())
@@ -115,6 +125,13 @@ def explain_transaction_case(transaction_id: str, bundle: Optional[Dict[str, Any
         model=config.OPENCLAW_OPENAI_MODEL,
         reasoning_effort=config.OPENCLAW_OPENAI_REASONING_EFFORT,
     )
+    judgment = judge_case_disposition(
+        "transaction",
+        case_summary,
+        active_bundle,
+        model=config.OPENCLAW_OPENAI_MODEL,
+        reasoning_effort=config.OPENCLAW_OPENAI_REASONING_EFFORT,
+    )
     fallback = (
         f"{explanation['summary']}\n\n"
         "Supporting evidence:\n"
@@ -124,11 +141,12 @@ def explain_transaction_case(transaction_id: str, bundle: Optional[Dict[str, Any
     )
     return {
         "found": True,
-        "answer": explanation["ai_text"] or fallback,
-        "used_ai": bool(explanation["ai_text"]),
+        "answer": _append_judge_summary(explanation["ai_text"] or fallback, judgment),
+        "used_ai": bool(explanation["ai_text"] or judgment.get("used_ai")),
         "case_type": "transaction",
         "case_id": transaction_id,
         "case_summary": case_summary,
+        "judge": judgment,
         "bundle": active_bundle,
     }
 
@@ -153,6 +171,13 @@ def explain_account_case(account_id: str, bundle: Optional[Dict[str, Any]] = Non
         model=config.OPENCLAW_OPENAI_MODEL,
         reasoning_effort=config.OPENCLAW_OPENAI_REASONING_EFFORT,
     )
+    judgment = judge_case_disposition(
+        "account",
+        case_summary,
+        active_bundle,
+        model=config.OPENCLAW_OPENAI_MODEL,
+        reasoning_effort=config.OPENCLAW_OPENAI_REASONING_EFFORT,
+    )
     fallback = (
         f"{explanation['summary']}\n\n"
         "Supporting evidence:\n"
@@ -162,11 +187,12 @@ def explain_account_case(account_id: str, bundle: Optional[Dict[str, Any]] = Non
     )
     return {
         "found": True,
-        "answer": explanation["ai_text"] or fallback,
-        "used_ai": bool(explanation["ai_text"]),
+        "answer": _append_judge_summary(explanation["ai_text"] or fallback, judgment),
+        "used_ai": bool(explanation["ai_text"] or judgment.get("used_ai")),
         "case_type": "account",
         "case_id": account_id,
         "case_summary": case_summary,
+        "judge": judgment,
         "bundle": active_bundle,
     }
 
@@ -192,6 +218,13 @@ def merchant_summary(merchant_id: str, bundle: Optional[Dict[str, Any]] = None) 
         model=config.OPENCLAW_OPENAI_MODEL,
         reasoning_effort=config.OPENCLAW_OPENAI_REASONING_EFFORT,
     )
+    judgment = judge_case_disposition(
+        "merchant",
+        case_summary,
+        active_bundle,
+        model=config.OPENCLAW_OPENAI_MODEL,
+        reasoning_effort=config.OPENCLAW_OPENAI_REASONING_EFFORT,
+    )
     linked = pd.DataFrame()
     if not transactions.empty and "merchantid" in transactions.columns:
         linked = transactions.loc[transactions["merchantid"].astype(str).str.lower() == merchant_id.lower()].copy()
@@ -206,11 +239,12 @@ def merchant_summary(merchant_id: str, bundle: Optional[Dict[str, Any]] = None) 
     )
     return {
         "found": True,
-        "answer": explanation["ai_text"] or fallback,
-        "used_ai": bool(explanation["ai_text"]),
+        "answer": _append_judge_summary(explanation["ai_text"] or fallback, judgment),
+        "used_ai": bool(explanation["ai_text"] or judgment.get("used_ai")),
         "case_type": "merchant",
         "case_id": merchant_id,
         "case_summary": case_summary,
+        "judge": judgment,
         "bundle": active_bundle,
     }
 

@@ -502,7 +502,9 @@ def _strongest_risk_components(case_row: pd.Series) -> str:
         "Isolation Forest": float(case_row.get("isolation_forest_score", 0) or 0),
         "Local Outlier Factor": float(case_row.get("lof_score", 0) or 0),
         "K-Means": float(case_row.get("kmeans_anomaly_score", 0) or 0),
+        "Autoencoder": float(case_row.get("autoencoder_score", 0) or 0),
         "Graph Risk": float(case_row.get("graph_risk_score", 0) or 0),
+        "TDA Risk": float(case_row.get("tda_risk_score", 0) or 0),
         "Amount Outlier": float(case_row.get("amount_outlier_risk", 0) or 0),
         "Login Attempts": float(case_row.get("login_attempt_risk", 0) or 0),
     }
@@ -554,6 +556,8 @@ def summarize_case_evidence(
                     ("Device change flag", "device_change_flag"),
                     ("IP change flag", "ip_change_flag"),
                     ("Graph risk", "graph_risk_score"),
+                    ("Autoencoder score", "autoencoder_score"),
+                    ("TDA risk", "tda_risk_score"),
                 ]:
                     if column in row.index:
                         evidence_lines.append(f"{label}: {float(row.get(column, 0) or 0):.3f}")

@@ -33,6 +33,7 @@ except Exception as exc:  # pragma: no cover - import guard for optional depende
 from src import config
 from src.chatops import load_active_bundle
 from src.chatops.alert_service import generate_fraud_alerts
+from src.chatops.openclaw_agent import polish_reply_with_openclaw
 from src.chatops.discord_state import (
     build_case_key,
     get_case_thread,
@@ -92,6 +93,27 @@ def _split_for_discord(text: str, max_chars: int = 1800) -> List[str]:
 
 async def _run_blocking(func, /, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def _maybe_polish_reply(
+    *,
+    user_message: str,
+    grounded_answer: str,
+    bundle: Dict[str, Any] | None = None,
+    transcript: str = "",
+    case_type: str | None = None,
+    case_id: str | None = None,
+) -> str:
+    polished = await _run_blocking(
+        polish_reply_with_openclaw,
+        user_message=user_message,
+        grounded_answer=grounded_answer,
+        bundle=bundle,
+        transcript=transcript,
+        case_type=case_type,
+        case_id=case_id,
+    )
+    return polished or grounded_answer
 
 
 def _summarize_columns(columns: list[str], max_items: int = 8) -> str:
@@ -372,11 +394,17 @@ async def _send_image_analysis_result(message: discord.Message, analysis: Dict[s
     ]
     case_type = analysis.get("primary_case_type")
     case_id = analysis.get("primary_case_id")
+    reply_text = await _maybe_polish_reply(
+        user_message=str(analysis.get("user_prompt") or "Analyze this image"),
+        grounded_answer=analysis["reply_text"],
+        case_type=case_type,
+        case_id=case_id,
+    )
     if case_type and case_id:
         target = await _get_or_create_case_thread(message, case_type=case_type, case_id=case_id)
-        await _send_text(target, analysis["reply_text"], files=files)
+        await _send_text(target, reply_text, files=files)
         return
-    await _send_text(message.channel, analysis["reply_text"], files=files)
+    await _send_text(message.channel, reply_text, files=files)
 
 
 async def _process_pending_upload(
@@ -434,7 +462,14 @@ async def _process_pending_upload(
         },
     )
     _write_state(state)
-    await _send_reply_with_files(message, result["reply_text"], result["files"])
+    transcript = await _build_transcript(message.channel, config.OPENCLAW_DISCORD_MAX_CONTEXT_MESSAGES)
+    reply_text = await _maybe_polish_reply(
+        user_message=instruction_text.strip(),
+        grounded_answer=result["reply_text"],
+        bundle=result.get("bundle"),
+        transcript=transcript,
+    )
+    await _send_reply_with_files(message, reply_text, result["files"])
     return True
 
 
@@ -506,7 +541,14 @@ async def _handle_csv_upload(
         },
     )
     _write_state(state)
-    await _send_reply_with_files(message, result["reply_text"], result["files"])
+    transcript = await _build_transcript(message.channel, config.OPENCLAW_DISCORD_MAX_CONTEXT_MESSAGES)
+    reply_text = await _maybe_polish_reply(
+        user_message=content.strip() or attachment.filename,
+        grounded_answer=result["reply_text"],
+        bundle=result.get("bundle"),
+        transcript=transcript,
+    )
+    await _send_reply_with_files(message, reply_text, result["files"])
     return True
 
 
@@ -725,6 +767,13 @@ async def _handle_command_workflow(message: discord.Message, state: Dict[str, An
         analyst_intent="command_workflow",
         goal=content.strip(),
     )
+    answer = await _maybe_polish_reply(
+        user_message=content.strip(),
+        grounded_answer=answer,
+        bundle=bundle,
+        case_type=case_type,
+        case_id=case_id,
+    )
 
     if case_type and case_id:
         target = await _get_or_create_case_thread(message, case_type=case_type, case_id=case_id)
@@ -856,7 +905,14 @@ async def on_message(message: discord.Message) -> None:
     transcript = await _build_transcript(message.channel, config.OPENCLAW_DISCORD_MAX_CONTEXT_MESSAGES)
     async with message.channel.typing():
         response = await _run_blocking(answer_analyst_question, content, conversation_context=transcript)
-    answer = response["answer"]
+        answer = await _maybe_polish_reply(
+            user_message=content,
+            grounded_answer=response["answer"],
+            bundle=response.get("bundle"),
+            transcript=transcript,
+            case_type=response.get("case_type"),
+            case_id=response.get("case_id"),
+        )
     _update_case_memory(
         state=state,
         channel_id=str(message.channel.id),

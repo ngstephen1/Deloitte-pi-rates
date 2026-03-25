@@ -52,6 +52,7 @@ RAW_DATA_FILE = RAW_DATA_DIR / "bank_transactions_data.csv"
 CLEANED_DATA_FILE = PROCESSED_DATA_DIR / "transactions_cleaned.csv"
 ANOMALY_SCORES_FILE = REPORTS_DIR / "anomaly_scores.csv"
 GRAPH_FEATURES_FILE = REPORTS_DIR / "graph_features.csv"
+TDA_FEATURES_FILE = REPORTS_DIR / "tda_features.csv"
 RISK_TRANSACTIONS_FILE = REPORTS_DIR / "risk_ranked_transactions.csv"
 RISK_ACCOUNTS_FILE = REPORTS_DIR / "risk_ranked_accounts.csv"
 RISK_MERCHANTS_FILE = REPORTS_DIR / "risk_ranked_merchants.csv"
@@ -60,6 +61,7 @@ RISK_IPS_FILE = REPORTS_DIR / "risk_ranked_ips.csv"
 TOP_LOCATIONS_FILE = REPORTS_DIR / "top_locations.csv"
 EXECUTIVE_SUMMARY_FILE = REPORTS_DIR / "executive_summary.json"
 ANALYST_DECISIONS_FILE = REPORTS_DIR / "analyst_decisions.csv"
+AI_REVIEW_RECOMMENDATIONS_FILE = REPORTS_DIR / "ai_review_recommendations.csv"
 CHATOPS_MANIFEST_FILE = CHATOPS_ACTIVE_DIR / "manifest.json"
 CHATOPS_ALERT_STATE_FILE = CHATOPS_DIR / "alert_state.json"
 CHATOPS_DISCORD_STATE_FILE = CHATOPS_DIR / "discord_bot_state.json"
@@ -89,6 +91,13 @@ KMEANS_N_CLUSTERS = 10
 KMEANS_RANDOM_STATE = 42
 KMEANS_CONTAMINATION = 0.05  # Treat smallest clusters as anomalies
 
+# Shallow autoencoder-style reconstruction model
+AUTOENCODER_CONTAMINATION = 0.05
+AUTOENCODER_RANDOM_STATE = 42
+AUTOENCODER_MAX_ITER = 250
+AUTOENCODER_ALPHA = 0.0005
+AUTOENCODER_BOTTLENECK_DIM = 4
+
 # Numeric features for anomaly detection
 ANOMALY_FEATURES = [
     "transactionamount",
@@ -100,6 +109,34 @@ ANOMALY_FEATURES = [
     "transaction_amount_to_balance_ratio",
     "time_since_previous_transaction",
 ]
+
+# Additional numeric features used by the TDA stage
+TDA_FEATURE_COLUMNS = [
+    "transactionamount",
+    "transactionduration",
+    "loginattempts",
+    "accountbalance",
+    "transaction_amount_to_balance_ratio",
+    "time_since_previous_transaction",
+    "login_attempt_risk",
+    "device_change_flag",
+    "ip_change_flag",
+    "account_transaction_count",
+    "merchant_transaction_count",
+    "location_transaction_count",
+]
+
+# ============================================================================
+# TOPOLOGICAL DATA ANALYSIS PARAMETERS
+# ============================================================================
+TDA_PCA_COMPONENTS = 2
+TDA_MAPPER_N_CUBES = 8
+TDA_MAPPER_OVERLAP = 0.35
+TDA_MAPPER_DBSCAN_EPS = 1.05
+TDA_MAPPER_DBSCAN_MIN_SAMPLES = 4
+TDA_PERSISTENCE_CLUSTER_COUNT = 10
+TDA_PERSISTENCE_MAX_POINTS_PER_CLUSTER = 120
+TDA_PERSISTENCE_MAXDIM = 1
 
 # ============================================================================
 # GRAPH ANALYSIS PARAMETERS
@@ -120,19 +157,21 @@ SUSPICIOUS_CENTRALITY_PERCENTILE = 85  # High centrality = bridge in network
 
 RISK_WEIGHTS = {
     # Anomaly detection signals
-    "isolation_forest_score": 0.25,
-    "lof_score": 0.20,
-    "kmeans_anomaly_score": 0.15,
+    "isolation_forest_score": 0.18,
+    "lof_score": 0.14,
+    "kmeans_anomaly_score": 0.10,
+    "autoencoder_score": 0.15,
+    "tda_risk_score": 0.10,
 
     # Graph-based signals
-    "graph_risk_score": 0.15,
+    "graph_risk_score": 0.12,
 
     # Transaction metadata signals
-    "login_attempt_risk": 0.10,
-    "amount_outlier_risk": 0.10,
+    "login_attempt_risk": 0.08,
+    "amount_outlier_risk": 0.09,
 
     # Synthetic/data quality signals
-    "previous_date_regenerated": 0.05,  # Small penalty for synthetic previous dates
+    "previous_date_regenerated": 0.04,  # Small penalty for synthetic previous dates
 }
 
 # Ensure weights sum to ~1.0 for interpretability
@@ -192,10 +231,20 @@ def _clean_env_text(name: str, default: str = "") -> str:
     return str(os.environ.get(name, default)).strip().strip('"').strip("'")
 
 
+# Structured AI review-judge controls
+ENABLE_AI_REVIEW_JUDGE = _env_bool("ENABLE_AI_REVIEW_JUDGE", True)
+AI_REVIEW_MAX_CASES = int(os.environ.get("AI_REVIEW_MAX_CASES", "25"))
+AI_REVIEW_MAX_AI_CASES = int(os.environ.get("AI_REVIEW_MAX_AI_CASES", "5"))
+AI_REVIEW_MAX_OUTPUT_TOKENS = int(os.environ.get("AI_REVIEW_MAX_OUTPUT_TOKENS", "260"))
+
+
 OPENCLAW_ENABLED = _env_bool("OPENCLAW_ENABLED", True)
 OPENCLAW_STREAMLIT_AUTO_SEND = _env_bool("OPENCLAW_STREAMLIT_AUTO_SEND", True)
 OPENCLAW_PUBLIC_BASE_URL = _clean_env_text("OPENCLAW_PUBLIC_BASE_URL", "http://localhost:3002").rstrip("/")
 OPENCLAW_AGENT = _clean_env_text("OPENCLAW_AGENT", "main")
+OPENCLAW_USE_AGENT_RUNTIME = _env_bool("OPENCLAW_USE_AGENT_RUNTIME", False)
+OPENCLAW_CLI_LAUNCHER = _clean_env_text("OPENCLAW_CLI_LAUNCHER", "npx")
+OPENCLAW_CLI_PACKAGE = _clean_env_text("OPENCLAW_CLI_PACKAGE", "openclaw@latest")
 OPENCLAW_WEBHOOK_FORMAT = _clean_env_text("OPENCLAW_WEBHOOK_FORMAT", "discord").lower()
 OPENCLAW_DEFAULT_CHANNEL_ID = _clean_env_text("OPENCLAW_DEFAULT_CHANNEL_ID")
 OPENCLAW_DEFAULT_CONVERSATION_ID = _clean_env_text("OPENCLAW_DEFAULT_CONVERSATION_ID")
@@ -223,6 +272,8 @@ OPENCLAW_OPENAI_MODEL = _clean_env_text("OPENCLAW_OPENAI_MODEL", "gpt-5.4")
 OPENCLAW_OPENAI_REASONING_EFFORT = _clean_env_text("OPENCLAW_OPENAI_REASONING_EFFORT", "medium").lower()
 OPENCLAW_OPENAI_MAX_OUTPUT_TOKENS = int(os.environ.get("OPENCLAW_OPENAI_MAX_OUTPUT_TOKENS", "600"))
 OPENCLAW_IMAGE_MAX_OUTPUT_TOKENS = int(os.environ.get("OPENCLAW_IMAGE_MAX_OUTPUT_TOKENS", "950"))
+OPENCLAW_DISCORD_THINKING = _clean_env_text("OPENCLAW_DISCORD_THINKING", "low")
+OPENCLAW_DISCORD_AGENT_TIMEOUT_MS = int(os.environ.get("OPENCLAW_DISCORD_AGENT_TIMEOUT_MS", "120000"))
 
 # Discord companion bot controls
 DISCORD_REPLY_ONLY_ON_MENTION = _env_bool("DISCORD_REPLY_ONLY_ON_MENTION", False)

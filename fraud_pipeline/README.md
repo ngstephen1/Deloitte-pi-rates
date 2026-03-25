@@ -8,8 +8,8 @@ This pipeline processes Kaggle's Bank Transaction Dataset (2,512 transactions) t
 
 1. **Data Ingestion & Cleaning**: Normalize dates, engineer features, handle anomalies
 2. **EDA & Profiling**: Summary statistics, Benford's Law, visualizations
-3. **Anomaly Detection**: Isolation Forest, LOF, K-Means clustering
-4. **TDA Analysis**: Topological Data Analysis (stub for future enhancement)
+3. **Anomaly Detection**: Isolation Forest, LOF, K-Means clustering, and shallow autoencoder reconstruction
+4. **TDA Analysis**: Real Mapper-style topology and persistent homology features
 5. **Graph Analysis**: Transaction graph with NetworkX, suspicious patterns
 6. **Risk Scoring**: Composite transparent scoring from all signals
 7. **Reporting & Visualizations**: Dashboards, summaries, optional OpenAI explanations
@@ -24,7 +24,10 @@ This pipeline processes Kaggle's Bank Transaction Dataset (2,512 transactions) t
 - **Tableau-ready outputs**: All results exported as CSV
 - **Interactive executive demo**: Streamlit dashboard with polished KPI cards, filters, charts, and analyst workflow
 - **CSV upload workflow**: Users can choose a CSV type, validate it, preview it, and analyze raw uploads directly in Streamlit
-- **Optional AI features**: Live recommendations, Q&A, and case explanations powered by `OPENAI_API_KEY`
+- **Optional AI features**: Live recommendations, Q&A, case explanations, and structured review judgments powered by `OPENAI_API_KEY`
+- **Expanded anomaly stack**: Isolation Forest, LOF, K-Means, and an autoencoder-style reconstruction detector
+- **Real TDA features**: Mapper component structure and persistent-homology-derived cluster features written to `outputs/reports/tda_features.csv`
+- **LLM-as-a-judge layer**: Suggested dispositions with rationale and reviewer checks, plus exported review recommendations in `outputs/reports/ai_review_recommendations.csv`
 - **OpenClaw-style ChatOps**: Discord webhook delivery, fraud alerting, proactive reminders, and grounded analyst Q&A against the latest fraud context
 - **Discord image analysis**: OpenClaw can review uploaded screenshots, statements, invoices, suspicious emails, verification screens, and fraud dashboards with grounded image-to-risk analysis
 - **Persistent review log**: Analyst decisions are stored in a lightweight CSV log with timestamps and versioned updates
@@ -77,14 +80,16 @@ OPENAI_MODEL = "gpt-5-mini"
 ### 3. Run Backend Pipeline (Steps 1-7)
 
 ```bash
-# Run full pipeline: ingest → EDA → anomaly detection → graph → risk scoring → reporting
+# Run full pipeline: ingest → EDA → anomaly detection (+ autoencoder) → TDA → graph → risk scoring → reporting
 python3 run_pipeline.py
 
 # This will:
 # - Process raw CSV and engineer features
-# - Run anomaly detection (IF, LOF, K-Means)
+# - Run anomaly detection (IF, LOF, K-Means, autoencoder reconstruction)
+# - Compute TDA features (Mapper + persistent homology)
 # - Compute graph-based risk metrics
 # - Combine into composite risk score
+# - Export review-judge suggestions for the analyst queue
 # - Generate visualizations (Plotly HTML)
 # - Create CSV exports for Tableau
 # - Generate executive summary
@@ -102,9 +107,10 @@ python3 -m streamlit run app/streamlit_app.py
 #  - Executive summary dashboard
 #  - CSV upload workflow with type selection and validation
 #  - Filter suspicious transactions by risk level, account, merchant, and channel
-#  - View risk component breakdown (IF, LOF, K-Means, graph)
+#  - View risk component breakdown (IF, LOF, K-Means, autoencoder, TDA, graph)
 #  - Generate AI recommendations and ask live questions about the active dataset
 #  - Generate AI case explanations for transactions, accounts, merchants, and locations
+#  - Show a structured judge suggestion before the analyst saves the final decision
 #  - Record analyst decisions (Approve Flag / Dismiss / Needs Review)
 #  - Persist and export review log
 #  - Publish the active fraud context for Discord/OpenClaw and optionally send report digests or alerts
@@ -144,6 +150,7 @@ export OPENCLAW_OPENAI_REASONING_EFFORT="medium"
 export OPENCLAW_DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
 export OPENCLAW_WEBHOOK_FORMAT="discord"
 export OPENCLAW_STREAMLIT_AUTO_SEND="true"
+export OPENCLAW_USE_AGENT_RUNTIME="false"
 export DISCORD_BOT_TOKEN="..."
 export DISCORD_ALLOWED_CHANNEL_IDS="1482399372724539568"
 export DISCORD_ALLOWED_GUILD_IDS="1482399372099452982"
@@ -151,6 +158,31 @@ export OPENCLAW_DISCORD_PROACTIVE_ENABLED="true"
 export OPENCLAW_DISCORD_PROACTIVE_CHANNEL_IDS="1482485873265213571"
 export DISCORD_REPLY_ONLY_ON_MENTION="false"
 ```
+
+Optional: route Discord AI replies through the real OpenClaw runtime, like the `cafair` repo does. In this mode, the fraud pipeline still generates the grounded answer first, and the Discord bot uses `openclaw agent` only for final synthesis:
+
+```bash
+export OPENCLAW_USE_AGENT_RUNTIME="true"
+export OPENCLAW_CLI_LAUNCHER="npx"
+export OPENCLAW_CLI_PACKAGE="openclaw@latest"
+export OPENCLAW_AGENT="main"
+export OPENCLAW_DISCORD_THINKING="low"
+```
+
+Then initialize the runtime in a separate terminal:
+
+```bash
+npx openclaw@latest health
+npx openclaw@latest gateway run --allow-unconfigured --verbose
+npx openclaw@latest models auth login --provider openai-codex --set-default
+npx openclaw@latest models status
+```
+
+Notes:
+
+- This matches the `cafair` pattern more closely: Discord stays local, but real agent turns can run through OpenClaw.
+- If the OpenClaw CLI path is unavailable or fails, the bot falls back to the local grounded fraud assistant.
+- On this machine, `npx openclaw@latest` may require clearing the local npm cache first if npm reports an `ENOENT` cache error.
 
 Manual ChatOps commands:
 
@@ -234,12 +266,14 @@ fraud_pipeline/
 │   │   └── risk_components_heatmap.html
 │   └── reports/                  # CSV exports & summaries
 │       ├── anomaly_scores.csv
+│       ├── tda_features.csv
 │       ├── graph_features.csv
 │       ├── risk_ranked_transactions.csv
 │       ├── risk_ranked_accounts.csv
 │       ├── risk_ranked_merchants.csv
 │       ├── risk_ranked_devices.csv
 │       ├── risk_ranked_ips.csv
+│       ├── ai_review_recommendations.csv
 │       ├── tableau_*.csv          # Tableau-optimized exports
 │       ├── executive_summary.json  # High-level metrics
 │       └── openai_explanations.json (if enabled)
@@ -249,12 +283,13 @@ fraud_pipeline/
 │   ├── ingest_clean.py           # Step 1: Data loading & engineering
 │   ├── eda_profile.py            # Step 2: Profiling & stats
 │   ├── benford.py                # Step 2b: Benford's Law
-│   ├── anomaly_detection.py      # Step 3: IF, LOF, K-Means
-│   ├── tda_analysis.py           # Step 3b: TDA (stub)
+│   ├── anomaly_detection.py      # Step 3: IF, LOF, K-Means, autoencoder reconstruction
+│   ├── tda_analysis.py           # Step 3b: Mapper + persistent homology TDA
 │   ├── graph_analysis.py         # Step 4: NetworkX graph
 │   ├── risk_scoring.py           # Step 5: Composite scoring
 │   ├── reporting.py              # Step 7: Visualizations & summaries
 │   ├── ai_assistant.py           # Shared AI recommendations, Q&A, and explanations
+│   ├── review_judge.py           # Structured AI review suggestions for analysts
 │   ├── dashboard_data.py         # Upload validation and in-memory dashboard bundles
 │   ├── chatops/                  # OpenClaw-style ChatOps context, alerting, formatting, delivery, and query services
 │   ├── openai_explanations.py    # Step 7: Optional AI explanations
@@ -460,7 +495,7 @@ anomaly_scores = run_anomaly_detection(df)
 
 1. **Unsupervised learning**: No fraud labels in dataset; rely on statistical anomalies
 2. **Synthetic dates**: PreviousTransactionDate issue documented and handled automatically
-3. **Simple TDA**: Kept minimal to avoid dependency bloat; can enhance later
+3. **TDA now runs with real dependencies**: Mapper and persistent homology are included, but you should still expect the topological stage to add runtime compared with the original lightweight stub
 4. **Transparent scoring**: All weights visible and configurable, not a black box
 5. **CSV-first**: All outputs as CSV for Tableau/BI tool compatibility
 6. **Optional OpenAI**: Works without API key; graceful degradation
@@ -469,7 +504,7 @@ anomaly_scores = run_anomaly_detection(df)
 
 - Supervised classification if fraud labels available
 - Graph Neural Networks for learned embeddings
-- Full TDA visualization (KeplerMapper, Ripser)
+- Richer TDA visualization outputs and topology-first dashboards
 - Time-series anomaly detection (LSTM/Prophet)
 - Real-time scoring API
 - Batch job scheduler for production deployment

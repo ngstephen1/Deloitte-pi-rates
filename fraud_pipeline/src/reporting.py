@@ -286,6 +286,8 @@ def plot_risk_components_breakdown(risk_df: pd.DataFrame) -> Path:
         "isolation_forest_score",
         "lof_score",
         "kmeans_anomaly_score",
+        "autoencoder_score",
+        "tda_risk_score",
         "graph_risk_score",
         "login_attempt_risk",
         "amount_outlier_risk",

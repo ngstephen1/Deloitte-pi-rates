@@ -4,7 +4,7 @@ Runs all stages end-to-end with optional memory-efficient modes:
 1. Data ingestion & cleaning
 2. EDA & profiling
 3. Anomaly detection (optional)
-4. TDA (stub)
+4. TDA
 5. Graph analysis (optional)
 6. Risk scoring
 7. Reporting & visualizations
@@ -23,13 +23,15 @@ from pathlib import Path
 from datetime import datetime
 
 from src import config
+from src.dashboard_data import bundle_from_transactions
 from src.utils import LOGGER, setup_logger
 from src.ingest_clean import load_and_clean
 from src.eda_profile import eda_and_profile
 from src.anomaly_detection import run_anomaly_detection
 from src.graph_analysis import graph_analysis
 from src.risk_scoring import risk_scoring
-from src.tda_analysis import tda_analysis_stub
+from src.review_judge import generate_review_judgments
+from src.tda_analysis import tda_analysis
 from src.reporting import generate_report
 
 
@@ -88,9 +90,9 @@ def run_pipeline(skip_streamlit: bool = False, skip_graph: bool = False,
             anomaly_scores = None
 
         # ====================================================================
-        # STAGE 3b: TDA (STUB FOR NOW)
+        # STAGE 3b: TDA
         # ====================================================================
-        tda_features = tda_analysis_stub(df)
+        tda_features = tda_analysis(df)
 
         # ====================================================================
         # STAGE 4: GRAPH ANALYSIS
@@ -105,11 +107,17 @@ def run_pipeline(skip_streamlit: bool = False, skip_graph: bool = False,
         # ====================================================================
         # STAGE 5: RISK SCORING
         # ====================================================================
-        risk_results = risk_scoring(df, anomaly_scores, graph_features)
+        risk_results = risk_scoring(df, anomaly_scores, graph_features, tda_features)
 
         # ====================================================================
         # STAGE 6: REPORTING & VISUALIZATIONS (Step 7)
         # ====================================================================
+        review_bundle = bundle_from_transactions(risk_results["transactions_ranked"], "Pipeline outputs")
+        review_bundle["accounts"] = risk_results["accounts_ranked"]
+        review_bundle["merchants"] = risk_results["merchants_ranked"]
+        review_bundle["devices"] = risk_results["devices_ranked"]
+        review_bundle["ips"] = risk_results["ips_ranked"]
+        review_judgments = generate_review_judgments(review_bundle)
         report_artifacts = generate_report(
             risk_results["transactions_ranked"],
             risk_results
@@ -125,9 +133,11 @@ def run_pipeline(skip_streamlit: bool = False, skip_graph: bool = False,
         LOGGER.info("📊 Output Files Created:")
         LOGGER.info(f"  Cleaned Data:           {config.CLEANED_DATA_FILE}")
         LOGGER.info(f"  Anomaly Scores:         {config.ANOMALY_SCORES_FILE}")
+        LOGGER.info(f"  TDA Features:           {config.TDA_FEATURES_FILE}")
         LOGGER.info(f"  Graph Features:         {config.GRAPH_FEATURES_FILE}")
         LOGGER.info(f"  Ranked Transactions:    {config.RISK_TRANSACTIONS_FILE}")
         LOGGER.info(f"  Ranked Accounts:        {config.RISK_ACCOUNTS_FILE}")
+        LOGGER.info(f"  Review Suggestions:     {config.AI_REVIEW_RECOMMENDATIONS_FILE}")
         LOGGER.info(f"  Visualizations:         {config.FIGURES_DIR}/")
         LOGGER.info(f"  Summary Tables:         {config.REPORTS_DIR}/")
         LOGGER.info("")

@@ -1,17 +1,21 @@
 """
 Unsupervised anomaly detection module.
-Combines Isolation Forest, Local Outlier Factor, and K-Means clustering.
+Combines Isolation Forest, Local Outlier Factor, K-Means clustering,
+and a shallow autoencoder-style reconstruction model.
 """
 
 from pathlib import Path
 from typing import Tuple
+import warnings
 
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
+from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.exceptions import ConvergenceWarning
 
 from . import config
 from .utils import LOGGER, normalize_to_01, save_csv, standardize_features
@@ -187,6 +191,61 @@ def run_kmeans_clustering(
     return anomaly_scores
 
 
+def run_autoencoder_reconstruction(
+    features: np.ndarray,
+    contamination: float = None,
+) -> np.ndarray:
+    """
+    Train a shallow autoencoder-style MLP to reconstruct the feature matrix.
+
+    The reconstruction error is used as an anomaly score. This keeps the
+    pipeline self-contained while adding a nonlinear detector without requiring
+    a heavyweight deep-learning stack.
+    """
+    if contamination is None:
+        contamination = config.AUTOENCODER_CONTAMINATION
+
+    n_samples, n_features = features.shape
+    if n_samples == 0:
+        return np.array([])
+    if n_samples < max(12, n_features * 2):
+        LOGGER.warning("Too few samples for autoencoder reconstruction; returning zero scores.")
+        return np.zeros(n_samples)
+
+    bottleneck = max(2, min(config.AUTOENCODER_BOTTLENECK_DIM, max(2, n_features // 2)))
+    hidden_width = max(n_features, bottleneck * 2)
+
+    LOGGER.info(
+        "Running shallow autoencoder reconstruction "
+        f"(hidden={hidden_width}->{bottleneck}->{hidden_width}, max_iter={config.AUTOENCODER_MAX_ITER})..."
+    )
+
+    model = MLPRegressor(
+        hidden_layer_sizes=(hidden_width, bottleneck, hidden_width),
+        activation="relu",
+        solver="adam",
+        alpha=config.AUTOENCODER_ALPHA,
+        random_state=config.AUTOENCODER_RANDOM_STATE,
+        max_iter=config.AUTOENCODER_MAX_ITER,
+        early_stopping=False,
+    )
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            model.fit(features, features)
+        reconstructed = model.predict(features)
+        reconstruction_error = np.mean((features - reconstructed) ** 2, axis=1)
+        scores = normalize_to_01(reconstruction_error)
+    except Exception as exc:
+        LOGGER.warning("Autoencoder reconstruction failed; returning zero scores. Error: %s", exc)
+        return np.zeros(n_samples)
+
+    anomaly_count = int((scores > 0.5).sum())
+    LOGGER.info(f"  Identified {anomaly_count} anomalies (autoencoder reconstruction error)")
+    return scores
+
+
 def run_anomaly_detection(df: pd.DataFrame, save_output: bool = True) -> pd.DataFrame:
     """
     Run full unsupervised anomaly detection pipeline.
@@ -205,11 +264,13 @@ def run_anomaly_detection(df: pd.DataFrame, save_output: bool = True) -> pd.Data
     isolation_forest_scores = run_isolation_forest(features_std)
     lof_scores = run_local_outlier_factor(features_std)
     kmeans_scores = run_kmeans_clustering(features_std)
+    autoencoder_scores = run_autoencoder_reconstruction(features_std)
 
     # Ensure all scores are 1D arrays
     isolation_forest_scores = np.asarray(isolation_forest_scores).flatten()
     lof_scores = np.asarray(lof_scores).flatten()
     kmeans_scores = np.asarray(kmeans_scores).flatten()
+    autoencoder_scores = np.asarray(autoencoder_scores).flatten()
 
     # Extract transactionid and accountid safely (handle 2D case)
     txn_id = df["transactionid"].values
@@ -224,6 +285,7 @@ def run_anomaly_detection(df: pd.DataFrame, save_output: bool = True) -> pd.Data
     LOGGER.info(f"  isolation_forest_scores shape: {isolation_forest_scores.shape}")
     LOGGER.info(f"  lof_scores shape: {lof_scores.shape}")
     LOGGER.info(f"  kmeans_scores shape: {kmeans_scores.shape}")
+    LOGGER.info(f"  autoencoder_scores shape: {autoencoder_scores.shape}")
     LOGGER.info(f"  txn_id shape: {txn_id.shape}")
     LOGGER.info(f"  acct_id shape: {acct_id.shape}")
 
@@ -234,6 +296,7 @@ def run_anomaly_detection(df: pd.DataFrame, save_output: bool = True) -> pd.Data
         "isolation_forest_score": isolation_forest_scores,
         "lof_score": lof_scores,
         "kmeans_anomaly_score": kmeans_scores,
+        "autoencoder_score": autoencoder_scores,
     })
 
     # Ensure transactionid is unique
@@ -246,7 +309,8 @@ def run_anomaly_detection(df: pd.DataFrame, save_output: bool = True) -> pd.Data
         anomaly_df["isolation_forest_score"]
         + anomaly_df["lof_score"]
         + anomaly_df["kmeans_anomaly_score"]
-    ) / 3
+        + anomaly_df["autoencoder_score"]
+    ) / 4
 
     # Flag rows with high ensemble score
     ensemble_threshold = 0.6

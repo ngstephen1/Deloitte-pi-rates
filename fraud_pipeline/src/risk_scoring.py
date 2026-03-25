@@ -39,8 +39,9 @@ def compute_amount_outlier_risk(df: pd.DataFrame) -> np.ndarray:
 
 def combine_risk_signals(
     df: pd.DataFrame,
-    anomaly_scores: pd.DataFrame,
-    graph_features: pd.DataFrame,
+    anomaly_scores: pd.DataFrame | None,
+    graph_features: pd.DataFrame | None,
+    tda_features: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Combine all risk signals into a single composite score using
@@ -81,14 +82,24 @@ def combine_risk_signals(
         LOGGER.warning(f"Duplicate columns found: {risk_df.columns[risk_df.columns.duplicated()].tolist()}")
         risk_df = risk_df.loc[:, ~risk_df.columns.duplicated(keep='first')]
 
-    # Validate transactionid uniqueness in anomaly_scores
-    if anomaly_scores["transactionid"].duplicated().any():
+    if anomaly_scores is None or not isinstance(anomaly_scores, pd.DataFrame) or anomaly_scores.empty:
+        anomaly_scores = pd.DataFrame({"transactionid": risk_df["transactionid"]})
+        for column in [
+            "isolation_forest_score",
+            "lof_score",
+            "kmeans_anomaly_score",
+            "autoencoder_score",
+            "ensemble_anomaly_score",
+            "is_anomalous",
+        ]:
+            anomaly_scores[column] = 0.0
+    elif anomaly_scores["transactionid"].duplicated().any():
         LOGGER.warning("Duplicate transactionid found in anomaly_scores. Removing duplicates.")
         anomaly_scores = anomaly_scores.drop_duplicates(subset="transactionid")
 
     # Validate transactionid alignment between df and anomaly_scores (exclude NaN)
     df_ids = set(df["transactionid"].dropna())
-    anomaly_ids = set(anomaly_scores["transactionid"].dropna())
+    anomaly_ids = set(anomaly_scores["transactionid"].dropna()) if "transactionid" in anomaly_scores.columns else set()
     
     if len(df_ids) == 0:
         LOGGER.error("No valid transactionid values found in df.")
@@ -121,6 +132,15 @@ def combine_risk_signals(
         )
     else:
         LOGGER.info("Graph features not provided. Skipping graph feature merge.")
+
+    if tda_features is not None and isinstance(tda_features, pd.DataFrame) and not tda_features.empty:
+        risk_df = risk_df.merge(
+            tda_features.drop(columns=["accountid"], errors="ignore"),
+            on="transactionid",
+            how="left",
+        )
+    else:
+        LOGGER.info("TDA features not provided. Skipping TDA feature merge.")
 
     # Compute amount outlier risk
     amount_outlier_risk = compute_amount_outlier_risk(df)
@@ -296,8 +316,9 @@ def summarize_ip_risk(risk_df: pd.DataFrame) -> pd.DataFrame:
 
 def risk_scoring(
     df: pd.DataFrame,
-    anomaly_scores: pd.DataFrame,
-    graph_features: pd.DataFrame,
+    anomaly_scores: pd.DataFrame | None,
+    graph_features: pd.DataFrame | None,
+    tda_features: pd.DataFrame | None = None,
     save_output: bool = True,
 ) -> dict:
     """
@@ -311,7 +332,7 @@ def risk_scoring(
     LOGGER.info("=" * 60)
 
     # Combine signals
-    risk_df = combine_risk_signals(df, anomaly_scores, graph_features)
+    risk_df = combine_risk_signals(df, anomaly_scores, graph_features, tda_features)
 
     # Rank transactions
     risk_ranked = rank_transactions(risk_df)
@@ -340,6 +361,7 @@ def risk_scoring(
         "merchants_ranked": merchant_risk,
         "devices_ranked": device_risk,
         "ips_ranked": ip_risk,
+        "tda_features": tda_features if isinstance(tda_features, pd.DataFrame) else pd.DataFrame(),
     }
 
 
@@ -352,5 +374,8 @@ if __name__ == "__main__":
     df = load_and_clean()
     anomaly_scores = run_anomaly_detection(df)
     graph_features, _ = graph_analysis(df)
-    results = risk_scoring(df, anomaly_scores, graph_features)
+    from .tda_analysis import tda_analysis
+
+    tda_features = tda_analysis(df)
+    results = risk_scoring(df, anomaly_scores, graph_features, tda_features)
     print(results["transactions_ranked"].head())

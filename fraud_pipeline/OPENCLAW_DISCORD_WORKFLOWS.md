@@ -26,7 +26,16 @@ This document tracks the upgraded Discord fraud workflows added on top of the ex
   - controls strategist agent
   - lead synthesis agent
 - Deeper case explanations with row-level evidence and model contributors.
+- Structured review-judge suggestions with:
+  - suggested disposition
+  - confidence
+  - rationale
+  - reviewer checks
 - Per-case proactive reminders with escalation when a case stays untouched beyond the configured threshold.
+- Optional real OpenClaw agent runtime synthesis for Discord replies when:
+  - `OPENCLAW_USE_AGENT_RUNTIME=true`
+  - the OpenClaw gateway is running
+  - the default model is authenticated through `openai-codex`
 - Image-analysis workflows for Discord attachments:
   - upload PNG/JPG/JPEG/WEBP and ask `analyze this`
   - `/analyze-image`
@@ -55,6 +64,26 @@ Run the Discord bot:
 ```bash
 cd /Users/macbook/Hack/Deloitte-pi-rates
 source venv/bin/activate
+python3 scripts/openclaw_discord_bot.py
+```
+
+Optional: start the real OpenClaw runtime first if you want Discord replies to be synthesized by `openclaw agent` instead of only the local fraud assistant:
+
+```bash
+cd /Users/macbook/Hack/Deloitte-pi-rates
+source venv/bin/activate
+export OPENCLAW_USE_AGENT_RUNTIME=true
+npx openclaw@latest health
+npx openclaw@latest gateway run --allow-unconfigured --verbose
+```
+
+In another terminal:
+
+```bash
+cd /Users/macbook/Hack/Deloitte-pi-rates
+source venv/bin/activate
+npx openclaw@latest models auth login --provider openai-codex --set-default
+npx openclaw@latest models status
 python3 scripts/openclaw_discord_bot.py
 ```
 
@@ -92,11 +121,15 @@ source venv/bin/activate
 python3 -m py_compile \
   fraud_pipeline/scripts/openclaw_discord_bot.py \
   fraud_pipeline/src/chatops/openclaw_bridge.py \
+  fraud_pipeline/src/chatops/openclaw_agent.py \
   fraud_pipeline/src/chatops/discord_state.py \
   fraud_pipeline/src/chatops/message_formatter.py \
   fraud_pipeline/src/chatops/query_service.py \
   fraud_pipeline/src/chatops/discord_upload_service.py \
-  fraud_pipeline/src/ai_assistant.py
+  fraud_pipeline/src/ai_assistant.py \
+  fraud_pipeline/src/review_judge.py \
+  fraud_pipeline/src/tda_analysis.py \
+  fraud_pipeline/src/anomaly_detection.py
 ```
 
 Workflow smoke test without Discord:
@@ -123,6 +156,14 @@ q = answer_analyst_question('Why was TX000275 flagged?', bundle=bundle)
 print(q.get('case_type'), q.get('case_id'))
 print(str(q['answer'])[:240])
 PY
+```
+
+Pipeline and artifact smoke test:
+
+```bash
+cd /Users/macbook/Hack/Deloitte-pi-rates/fraud_pipeline
+source ../venv/bin/activate
+ENABLE_AI_REVIEW_JUDGE=false python3 run_pipeline.py --skip-streamlit
 ```
 
 Image-analysis smoke test without Discord:
@@ -182,6 +223,7 @@ PY
 - `/top-accounts`
 - `/send-oof-brief`
 - `Why was TX000899 flagged?`
+- `What disposition would you suggest for TX000275?`
 - `What should OOF prioritize if resources are limited?`
 - `Give me the top control gaps in the current fraud context.`
 - Upload `OOF_phishing_email_alert.png` with `analyze this`

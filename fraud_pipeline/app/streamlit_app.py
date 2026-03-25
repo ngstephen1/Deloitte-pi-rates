@@ -55,6 +55,7 @@ from src.dashboard_data import (
     validate_uploaded_csv,
 )
 from src.review_store import ReviewStore
+from src.review_judge import judge_case_disposition
 from styles import (
     BRAND,
     apply_chart_theme,
@@ -404,6 +405,20 @@ def get_cached_ai_recommendations(bundle: Dict[str, Any]) -> Dict[str, Any]:
     signature = bundle_signature(bundle)
     if signature not in cache:
         cache[signature] = generate_ai_recommendations(bundle)
+    return cache[signature]
+
+
+def get_cached_review_judgment(
+    entity_type: str,
+    case_summary: Dict[str, Any],
+    bundle: Dict[str, Any],
+    *,
+    case_key: str,
+) -> Dict[str, Any]:
+    cache = st.session_state.setdefault("review_judgment_cache", {})
+    signature = f"{bundle_signature(bundle)}::{case_key}"
+    if signature not in cache:
+        cache[signature] = judge_case_disposition(entity_type, case_summary, bundle)
     return cache[signature]
 
 
@@ -951,6 +966,8 @@ def page_upload_data() -> None:
                 st.session_state["uploaded_bundle"] = bundle
                 st.session_state.pop("qa_history", None)
                 st.session_state.pop("ai_recommendation_cache", None)
+                st.session_state.pop("review_judgment_cache", None)
+                st.session_state.pop("case_explanations", None)
                 st.session_state.pop("upload_qa_history", None)
                 for state_key in [
                     "upload_show_ai_recommendations",
@@ -1101,7 +1118,9 @@ def page_transactions(bundle: Dict[str, Any]) -> None:
         "Isolation Forest": float(tx.get("isolation_forest_score", 0) or 0),
         "Local Outlier Factor": float(tx.get("lof_score", 0) or 0),
         "K-Means": float(tx.get("kmeans_anomaly_score", 0) or 0),
+        "Autoencoder": float(tx.get("autoencoder_score", 0) or 0),
         "Graph Risk": float(tx.get("graph_risk_score", 0) or 0),
+        "TDA Risk": float(tx.get("tda_risk_score", 0) or 0),
         "Amount Outlier": float(tx.get("amount_outlier_risk", 0) or 0),
         "Login Attempt": float(tx.get("login_attempt_risk", 0) or 0),
     }
@@ -1142,8 +1161,24 @@ def page_transactions(bundle: Dict[str, Any]) -> None:
         "Capture disposition, notes, and review rationale for the selected case.",
         kicker="Workflow",
     )
+    review_judgment = get_cached_review_judgment(
+        "transaction",
+        tx.to_dict(),
+        bundle,
+        case_key=f"transaction::{selected_tx_id}",
+    )
+    judge_checks = "<br>".join(f"- {item}" for item in review_judgment.get("checks", [])[:3])
+    judge_label = "AI Review Judge" if review_judgment.get("used_ai") else "Structured Review Judge"
+    render_insight(
+        f"<strong>{judge_label}</strong><br>"
+        f"Suggested disposition: {badge(review_judgment['decision'])}"
+        f"<span style='margin-left:0.6rem; color:{BRAND['text_muted']}; font-weight:700; text-transform:uppercase; letter-spacing:0.12em;'>"
+        f"{review_judgment.get('confidence', 'medium')} confidence</span><br>"
+        f"{review_judgment.get('rationale', 'No rationale available.')}<br><br>"
+        f"<strong>Reviewer checks</strong><br>{judge_checks or '- Validate the case against linked entities before saving the final disposition.'}"
+    )
     current_decision = store.get_decision(str(selected_tx_id))
-    default_decision = current_decision["decision"] if current_decision else "Needs Review"
+    default_decision = current_decision["decision"] if current_decision else review_judgment.get("decision", "Needs Review")
     default_notes = current_decision["analyst_notes"] if current_decision else ""
 
     decision_col, note_col = st.columns([0.9, 1.7], gap="large")

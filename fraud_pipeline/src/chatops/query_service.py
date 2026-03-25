@@ -294,8 +294,31 @@ def create_oof_brief(
 
 def parse_command(command_text: str) -> Optional[Dict[str, str]]:
     normalized = command_text.strip()
-    if not normalized.startswith("/"):
+    if not normalized:
         return None
+    if not normalized.startswith("/"):
+        lowered = normalized.lower()
+        alias_map = {
+            "triage": "/triage",
+            "top-accounts": "/top-accounts",
+            "top accounts": "/top-accounts",
+            "pending-review": "/pending-review",
+            "pending review": "/pending-review",
+            "merchant": "/merchant",
+            "send-oof-brief": "/send-oof-brief",
+            "send oof brief": "/send-oof-brief",
+            "why-flagged": "/why-flagged",
+            "why flagged": "/why-flagged",
+        }
+        matched = None
+        for alias, command_name in alias_map.items():
+            if lowered == alias or lowered.startswith(f"{alias} "):
+                matched = command_name
+                remainder = normalized[len(alias):].strip()
+                normalized = f"{matched} {remainder}".strip()
+                break
+        if matched is None:
+            return None
     parts = normalized.split(maxsplit=1)
     command = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""

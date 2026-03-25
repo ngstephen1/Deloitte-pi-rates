@@ -8,6 +8,7 @@ while still grounding the answer in the local fraud outputs first.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from typing import Any, Dict, Optional
@@ -21,8 +22,47 @@ def openclaw_agent_enabled() -> bool:
     return bool(config.OPENCLAW_USE_AGENT_RUNTIME)
 
 
+def _parse_semver(text: str) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    if not match:
+        return None
+    return tuple(int(group) for group in match.groups())
+
+
+def _node_version() -> tuple[int, int, int] | None:
+    if shutil.which("node") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["node", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+    return _parse_semver((result.stdout or result.stderr or "").strip())
+
+
+def openclaw_runtime_issue() -> str | None:
+    if shutil.which(config.OPENCLAW_CLI_LAUNCHER) is None:
+        return f"`{config.OPENCLAW_CLI_LAUNCHER}` is not on PATH."
+    if config.OPENCLAW_CLI_LAUNCHER == "npx":
+        version = _node_version()
+        if version is None:
+            return "`node` is not available on PATH for the OpenClaw CLI runtime."
+        if version < (22, 12, 0):
+            dotted = ".".join(str(part) for part in version)
+            return (
+                "OpenClaw requires Node.js v22.12+ for `npx openclaw@latest` "
+                f"(current: v{dotted})."
+            )
+    return None
+
+
 def openclaw_agent_available() -> bool:
-    return shutil.which(config.OPENCLAW_CLI_LAUNCHER) is not None
+    return openclaw_runtime_issue() is None
 
 
 def _openclaw_command(prompt: str) -> list[str]:
@@ -112,9 +152,10 @@ def polish_reply_with_openclaw(
     if not openclaw_agent_enabled():
         return None
     if not openclaw_agent_available():
+        issue = openclaw_runtime_issue() or f"`{config.OPENCLAW_CLI_LAUNCHER}` is unavailable."
         LOGGER.warning(
-            "OpenClaw runtime is enabled but `%s` is not on PATH. Falling back to the local fraud assistant.",
-            config.OPENCLAW_CLI_LAUNCHER,
+            "OpenClaw runtime is enabled but unavailable: %s Falling back to the local fraud assistant.",
+            issue,
         )
         return None
 

@@ -182,6 +182,7 @@ Notes:
 
 - This matches the `cafair` pattern more closely: Discord stays local, but real agent turns can run through OpenClaw.
 - If the OpenClaw CLI path is unavailable or fails, the bot falls back to the local grounded fraud assistant.
+- `npx openclaw@latest` currently requires Node.js `v22.12+`. This Mac is on Node `v20.13.1`, so upgrade Node before enabling `OPENCLAW_USE_AGENT_RUNTIME=true`.
 - On this machine, `npx openclaw@latest` may require clearing the local npm cache first if npm reports an `ENOENT` cache error.
 
 Manual ChatOps commands:

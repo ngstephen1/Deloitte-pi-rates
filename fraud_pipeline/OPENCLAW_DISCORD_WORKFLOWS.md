@@ -73,9 +73,15 @@ Optional: start the real OpenClaw runtime first if you want Discord replies to b
 cd /Users/macbook/Hack/Deloitte-pi-rates
 source venv/bin/activate
 export OPENCLAW_USE_AGENT_RUNTIME=true
+npx openclaw@latest --version
 npx openclaw@latest health
 npx openclaw@latest gateway run --allow-unconfigured --verbose
 ```
+
+Important:
+
+- `npx openclaw@latest` requires Node.js `v22.12+`.
+- This Mac is currently on Node `v20.13.1`, so upgrade Node first or the bot will correctly fall back to the local grounded fraud assistant.
 
 In another terminal:
 

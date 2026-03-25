@@ -24,6 +24,7 @@ except Exception:
 
 try:
     import discord
+    from discord import app_commands
     from discord.ext import tasks
 except Exception as exc:  # pragma: no cover - import guard for optional dependency
     raise SystemExit(
@@ -53,6 +54,16 @@ from src.chatops.query_service import answer_analyst_question, create_oof_brief,
 
 def _parse_id_set(raw_value: str) -> set[str]:
     return {item.strip() for item in (raw_value or "").split(",") if item.strip()}
+
+
+def _allowed_channel_ids() -> set[str]:
+    return _parse_id_set(os.environ.get("DISCORD_ALLOWED_CHANNEL_IDS", "")) | _parse_id_set(
+        os.environ.get("OPENCLAW_DISCORD_PROACTIVE_CHANNEL_IDS", "")
+    )
+
+
+def _allowed_guild_ids() -> set[str]:
+    return _parse_id_set(os.environ.get("DISCORD_ALLOWED_GUILD_IDS", ""))
 
 
 def _read_state() -> Dict[str, Any]:
@@ -131,8 +142,8 @@ def _message_allowed(message: discord.Message) -> bool:
     if isinstance(message.channel, discord.DMChannel):
         return config.DISCORD_ALLOW_DMS
 
-    allowed_channels = _parse_id_set(os.environ.get("DISCORD_ALLOWED_CHANNEL_IDS", ""))
-    allowed_guilds = _parse_id_set(os.environ.get("DISCORD_ALLOWED_GUILD_IDS", ""))
+    allowed_channels = _allowed_channel_ids()
+    allowed_guilds = _allowed_guild_ids()
 
     if allowed_channels:
         channel_ids_to_check = {str(message.channel.id)}
@@ -143,6 +154,28 @@ def _message_allowed(message: discord.Message) -> bool:
             return False
     if allowed_guilds and message.guild and str(message.guild.id) not in allowed_guilds:
         return False
+    return True
+
+
+def _interaction_allowed(interaction: discord.Interaction) -> bool:
+    if interaction.guild_id is None:
+        return config.DISCORD_ALLOW_DMS
+
+    allowed_channels = _allowed_channel_ids()
+    allowed_guilds = _allowed_guild_ids()
+    if allowed_guilds and str(interaction.guild_id) not in allowed_guilds:
+        return False
+
+    if allowed_channels:
+        channel_ids_to_check = set()
+        if interaction.channel_id is not None:
+            channel_ids_to_check.add(str(interaction.channel_id))
+        channel_obj = interaction.channel
+        parent_id = getattr(channel_obj, "parent_id", None)
+        if parent_id is not None:
+            channel_ids_to_check.add(str(parent_id))
+        if not channel_ids_to_check.intersection(allowed_channels):
+            return False
     return True
 
 
@@ -333,6 +366,23 @@ async def _send_text(target: discord.abc.Messageable, text: str, *, files: list[
             await target.send(chunk)
     else:
         await target.send(files=files or [])
+
+
+async def _send_interaction_text(
+    interaction: discord.Interaction,
+    text: str,
+    *,
+    files: list[discord.File] | None = None,
+    ephemeral: bool = False,
+) -> None:
+    chunks = _split_for_discord(text)
+    first_text = chunks[0] if chunks else ""
+    if not interaction.response.is_done():
+        await interaction.response.send_message(first_text or None, files=files or [], ephemeral=ephemeral)
+    else:
+        await interaction.followup.send(first_text or None, files=files or [], ephemeral=ephemeral)
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=ephemeral)
 
 
 def _export_brief_path() -> Path:
@@ -795,11 +845,91 @@ intents.messages = True
 intents.guilds = True
 
 client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+
+async def _run_slash_workflow(interaction: discord.Interaction, command_text: str) -> None:
+    if not _interaction_allowed(interaction):
+        await _send_interaction_text(interaction, "This channel is not allowed.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    bundle = await _run_blocking(load_active_bundle)
+    command_result = await _run_blocking(run_command_workflow, command_text, bundle=bundle)
+    answer = command_result.get("answer", "No response available.")
+    case_type = command_result.get("case_type")
+    case_id = command_result.get("case_id")
+    export_files: list[discord.File] = []
+    export_path = command_result.get("export_path")
+    if export_path:
+        export_files.append(discord.File(str(export_path), filename=Path(export_path).name))
+    answer = await _maybe_polish_reply(
+        user_message=command_text,
+        grounded_answer=answer,
+        bundle=bundle,
+        case_type=case_type,
+        case_id=case_id,
+    )
+
+    state = _read_state()
+    _update_case_memory(
+        state=state,
+        channel_id=str(interaction.channel_id),
+        case_type=case_type,
+        case_id=case_id,
+        last_command=command_text,
+        analyst_intent="slash_command_workflow",
+        goal=command_text,
+    )
+    await _send_interaction_text(interaction, answer, files=export_files)
+
+
+@tree.command(name="triage", description="Explain a flagged transaction or account case.")
+@app_commands.describe(case_id="Transaction ID like TX000275 or account ID like AC00454")
+async def triage_command(interaction: discord.Interaction, case_id: str) -> None:
+    await _run_slash_workflow(interaction, f"/triage {case_id}")
+
+
+@tree.command(name="top_accounts", description="Show the top risky accounts in the active fraud context.")
+async def top_accounts_command(interaction: discord.Interaction) -> None:
+    await _run_slash_workflow(interaction, "/top-accounts")
+
+
+@tree.command(name="pending_review", description="Show the highest-priority items still pending analyst review.")
+async def pending_review_command(interaction: discord.Interaction) -> None:
+    await _run_slash_workflow(interaction, "/pending-review")
+
+
+@tree.command(name="merchant", description="Summarize a risky merchant in the active fraud context.")
+@app_commands.describe(merchant_id="Merchant ID like M026")
+async def merchant_command(interaction: discord.Interaction, merchant_id: str) -> None:
+    await _run_slash_workflow(interaction, f"/merchant {merchant_id}")
+
+
+@tree.command(name="send_oof_brief", description="Generate an OOF-ready fraud monitoring brief.")
+@app_commands.describe(focus="Optional focus for the executive brief")
+async def send_oof_brief_command(interaction: discord.Interaction, focus: str = "") -> None:
+    command_text = f"/send-oof-brief {focus}".strip()
+    await _run_slash_workflow(interaction, command_text)
+
+
+@tree.command(name="why_flagged", description="Explain why a transaction was flagged.")
+@app_commands.describe(transaction_id="Transaction ID like TX000275")
+async def why_flagged_command(interaction: discord.Interaction, transaction_id: str) -> None:
+    await _run_slash_workflow(interaction, f"/why-flagged {transaction_id}")
 
 
 @client.event
 async def on_ready() -> None:
     print(f"OpenClaw fraud bot connected as {client.user}")
+    guild_ids = _allowed_guild_ids()
+    if guild_ids:
+        for guild_id in guild_ids:
+            guild = discord.Object(id=int(guild_id))
+            tree.copy_global_to(guild=guild)
+            await tree.sync(guild=guild)
+    else:
+        await tree.sync()
     if config.OPENCLAW_DISCORD_PROACTIVE_ENABLED and proactive_channel_ids and not proactive_loop.is_running():
         proactive_loop.start()
 
@@ -879,7 +1009,8 @@ async def on_message(message: discord.Message) -> None:
         await _send_reply(
             message,
             "I can answer grounded fraud questions, send the current fraud report, show active alerts, process CSV uploads, and run workflow commands. "
-            "Try `/triage TX000275`, `/top-accounts`, `/pending-review`, `/merchant M026`, `/send-oof-brief`, or `/analyze-image`. "
+            "Try `triage TX000275`, `top-accounts`, `pending-review`, `merchant M026`, `send-oof-brief`, or `/analyze-image`. "
+            "The fraud bot also accepts the slash-prefixed text forms, but plain text is safer if Discord tries to route `/...` into native app commands. "
             "If you upload a CSV, I will ask what you want back if the goal is not clear. You can ask for a `report`, `annotated csv`, `cleaned csv`, or `both`. "
             "If you upload a PNG, JPG, JPEG, or WEBP image, ask things like `analyze this`, `is this suspicious?`, `compare this to current flagged patterns`, or `what should OOF do next based on this image?`.",
         )

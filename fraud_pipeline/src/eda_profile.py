@@ -39,8 +39,9 @@ def compute_categorical_summary(df: pd.DataFrame) -> pd.DataFrame:
     summaries = []
     for col in categorical_cols:
         unique_count = df[col].nunique()
-        mode_val = df[col].mode()[0] if len(df[col].mode()) > 0 else None
-        mode_freq = (df[col] == mode_val).sum() if mode_val else 0
+        mode_series = df[col].mode()
+        mode_val = mode_series.iloc[0] if len(mode_series) > 0 else None
+        mode_freq = (df[col] == mode_val).sum() if mode_val is not None else 0
 
         summaries.append({
             "column": col,

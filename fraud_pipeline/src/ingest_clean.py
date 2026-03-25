@@ -21,6 +21,12 @@ def load_raw_data(filepath: Path) -> pd.DataFrame:
     LOGGER.info(f"Loading raw data from {filepath}")
     df = pd.read_csv(filepath)
     LOGGER.info(f"Loaded {len(df)} rows, {len(df.columns)} columns")
+    
+    # Generate synthetic transactionid if missing or all NaN
+    if "transactionid" not in df.columns or df["transactionid"].isnull().all():
+        LOGGER.info("  Generating synthetic transactionid values...")
+        df["transactionid"] = pd.Series([f"TXN_{i:08d}" for i in range(len(df))], index=df.index)
+    
     return df
 
 
@@ -210,6 +216,9 @@ def validate_data_types(df: pd.DataFrame) -> pd.DataFrame:
                 if dtype.startswith("datetime"):
                     # Already parsed
                     pass
+                elif col == "transactionid":
+                    # Keep transactionid as simple string column
+                    df[col] = df[col].astype(str)
                 elif dtype == "category":
                     df[col] = df[col].astype(dtype)
                 else:

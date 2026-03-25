@@ -56,11 +56,49 @@ def combine_risk_signals(
     """
     LOGGER.info("Combining risk signals...")
 
-    # Start with transaction IDs
-    risk_df = df[["transactionid", "accountid", "merchantid", "deviceid", "ip_address", "location"]].copy()
+    # Start with transaction IDs and basic transaction info
+    risk_df = df[["transactionid", "accountid", "merchantid", "deviceid", "ip_address", "location", "transactionamount", "channel"]].copy()
+
+    # Flatten transactionid if it's 2D
+    txn_id = risk_df["transactionid"].values
+    if txn_id.ndim > 1:
+        risk_df["transactionid"] = txn_id[:, 0]
+    
+    # Check for duplicate columns
+    if risk_df.columns.duplicated().any():
+        LOGGER.warning(f"Duplicate columns found: {risk_df.columns[risk_df.columns.duplicated()].tolist()}")
+        risk_df = risk_df.loc[:, ~risk_df.columns.duplicated(keep='first')]
+
+    # Validate transactionid uniqueness in anomaly_scores
+    if anomaly_scores["transactionid"].duplicated().any():
+        LOGGER.warning("Duplicate transactionid found in anomaly_scores. Removing duplicates.")
+        anomaly_scores = anomaly_scores.drop_duplicates(subset="transactionid")
+
+    # Validate transactionid alignment between df and anomaly_scores (exclude NaN)
+    df_ids = set(df["transactionid"].dropna())
+    anomaly_ids = set(anomaly_scores["transactionid"].dropna())
+    
+    if len(df_ids) == 0:
+        LOGGER.error("No valid transactionid values found in df.")
+        raise ValueError("No valid transactionid in df.")
+    
+    if len(anomaly_ids) == 0:
+        LOGGER.error("No valid transactionid values found in anomaly_scores.")
+        raise ValueError("No valid transactionid in anomaly_scores.")
+    
+    missing_ids = df_ids - anomaly_ids
+    if missing_ids:
+        LOGGER.warning(f"Missing {len(missing_ids)} transactionid values in anomaly_scores.")
+        # Don't raise error; just log warning as merge will handle this with NaN
 
     # Merge anomaly scores
-    risk_df = risk_df.merge(anomaly_scores, on="transactionid", how="left")
+    # Ensure anomaly_scores has 1D transactionid and drop duplicates
+    if anomaly_scores["transactionid"].duplicated().any():
+        anomaly_scores = anomaly_scores.drop_duplicates(subset="transactionid", keep="first")
+    
+    # Merge on transactionid
+    risk_df = risk_df.merge(anomaly_scores.drop(columns=["accountid"], errors="ignore"), 
+                            on="transactionid", how="left", suffixes=("", "_anom"))
 
     # Merge graph features if available
     if graph_features is not None:
@@ -84,8 +122,9 @@ def combine_risk_signals(
     else:
         risk_df["previous_date_regenerated"] = 0.0
 
-    # Fill any NaN with 0 for scoring
-    risk_df = risk_df.fillna(0)
+    # Fill any NaN with 0 for numeric columns only
+    numeric_cols = risk_df.select_dtypes(include=[np.number]).columns
+    risk_df[numeric_cols] = risk_df[numeric_cols].fillna(0)
 
     # Compute composite score using configured weights
     composite_score = np.zeros(len(risk_df))

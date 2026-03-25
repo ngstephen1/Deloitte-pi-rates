@@ -15,6 +15,7 @@ For now, this returns minimal dummy outputs so the pipeline can proceed.
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from . import config
@@ -38,13 +39,20 @@ def tda_analysis_stub(df: pd.DataFrame) -> pd.DataFrame:
     LOGGER.info("TDA module currently a stub (no heavy dependencies).")
     LOGGER.info("Returning placeholder features for future enhancement.\n")
 
-    # Create stub output
+    # Create stub output with arrays (one value per transaction)
+    n_rows = len(df)
+    
+    # Extract transactionid safely (handle 2D case)
+    txn_id = df["transactionid"].values
+    if txn_id.ndim > 1:
+        txn_id = txn_id[:, 0]
+    
     tda_df = pd.DataFrame({
-        "transactionid": df["transactionid"],
-        "mapper_connected_component_id": 0,
-        "mapper_distance_to_core": 0.0,
-        "persistence_homology_feature_1": 0.0,
-        "persistence_homology_feature_2": 0.0,
+        "transactionid": txn_id,
+        "mapper_connected_component_id": np.zeros(n_rows, dtype=int),
+        "mapper_distance_to_core": np.zeros(n_rows, dtype=float),
+        "persistence_homology_feature_1": np.zeros(n_rows, dtype=float),
+        "persistence_homology_feature_2": np.zeros(n_rows, dtype=float),
     })
 
     # Save stub output

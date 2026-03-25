@@ -53,7 +53,12 @@ def normalize_to_01(values: np.ndarray) -> np.ndarray:
 
     scaler = MinMaxScaler(feature_range=(0, 1))
     result = np.zeros_like(values, dtype=float)
-    result[valid_mask] = scaler.fit_transform(values[valid_mask].reshape(-1, 1)).ravel()
+    
+    # Fit and transform only valid values
+    scaled_values = scaler.fit_transform(values[valid_mask].reshape(-1, 1))
+    # Ensure result is 1D
+    scaled_values = scaled_values.ravel()
+    result[valid_mask] = scaled_values
     result[~valid_mask] = np.nan
 
     return result

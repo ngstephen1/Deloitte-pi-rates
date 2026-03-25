@@ -193,14 +193,40 @@ def run_anomaly_detection(df: pd.DataFrame) -> pd.DataFrame:
     lof_scores = run_local_outlier_factor(features_std)
     kmeans_scores = run_kmeans_clustering(features_std)
 
+    # Ensure all scores are 1D arrays
+    isolation_forest_scores = np.asarray(isolation_forest_scores).flatten()
+    lof_scores = np.asarray(lof_scores).flatten()
+    kmeans_scores = np.asarray(kmeans_scores).flatten()
+
+    # Extract transactionid and accountid safely (handle 2D case)
+    txn_id = df["transactionid"].values
+    if txn_id.ndim > 1:
+        txn_id = txn_id[:, 0]
+    
+    acct_id = df["accountid"].values
+    if acct_id.ndim > 1:
+        acct_id = acct_id[:, 0]
+
+    # Validate dimensions
+    LOGGER.info(f"  isolation_forest_scores shape: {isolation_forest_scores.shape}")
+    LOGGER.info(f"  lof_scores shape: {lof_scores.shape}")
+    LOGGER.info(f"  kmeans_scores shape: {kmeans_scores.shape}")
+    LOGGER.info(f"  txn_id shape: {txn_id.shape}")
+    LOGGER.info(f"  acct_id shape: {acct_id.shape}")
+
     # Create anomaly output dataframe
     anomaly_df = pd.DataFrame({
-        "transactionid": df["transactionid"],
-        "accountid": df["accountid"],
+        "transactionid": txn_id,
+        "accountid": acct_id,
         "isolation_forest_score": isolation_forest_scores,
         "lof_score": lof_scores,
         "kmeans_anomaly_score": kmeans_scores,
     })
+
+    # Ensure transactionid is unique
+    if anomaly_df["transactionid"].duplicated().any():
+        LOGGER.warning("Duplicate transactionid found in anomaly_df. Removing duplicates.")
+        anomaly_df = anomaly_df.drop_duplicates(subset="transactionid")
 
     # Ensemble score: average of all methods (equally weighted)
     anomaly_df["ensemble_anomaly_score"] = (

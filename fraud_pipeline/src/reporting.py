@@ -270,12 +270,19 @@ def plot_risk_components_breakdown(risk_df: pd.DataFrame) -> Path:
     # Get top N high-risk transactions
     top_transactions = risk_df.nlargest(top_n, "composite_risk_score")
     
+    # Filter components to only those present in the data
+    available_components = [c for c in components if c in top_transactions.columns]
+    
+    if not available_components:
+        LOGGER.warning("No risk components available for heatmap.")
+        available_components = ["composite_risk_score"]
+    
     # Extract component scores
-    component_matrix = top_transactions[components].fillna(0)
+    component_matrix = top_transactions[available_components].fillna(0)
     
     fig = go.Figure(data=go.Heatmap(
         z=component_matrix.values,
-        x=components,
+        x=available_components,
         y=[f"Tx {i}" for i in range(len(component_matrix))],
         colorscale="RdYlGn_r",
     ))
@@ -312,9 +319,9 @@ def plot_location_risk(risk_df: pd.DataFrame) -> Path:
         color="avg_risk_score",
         color_continuous_scale="Reds",
         height=500,
+        orientation="h",
     )
     
-    fig.update_layout(orientation="h")
     path = config.FIGURES_DIR / "risk_by_location.html"
     fig.write_html(str(path))
     LOGGER.info(f"  Saved: {path}")
@@ -366,17 +373,17 @@ def create_executive_summary(risk_df: pd.DataFrame, risk_results: Dict) -> Dict:
     LOGGER.info("Generating executive summary...")
     
     summary = {
-        "total_transactions": len(risk_df),
-        "total_accounts": risk_df["accountid"].nunique(),
-        "total_merchants": risk_df["merchantid"].nunique(),
-        "total_locations": risk_df["location"].nunique(),
+        "total_transactions": int(len(risk_df)),
+        "total_accounts": int(risk_df["accountid"].nunique()),
+        "total_merchants": int(risk_df["merchantid"].nunique()),
+        "total_locations": int(risk_df["location"].nunique()),
         
         # Risk distribution
-        "high_risk_count": (risk_df["risk_level"] == "High").sum(),
-        "high_risk_pct": 100 * (risk_df["risk_level"] == "High").sum() / len(risk_df),
+        "high_risk_count": int((risk_df["risk_level"] == "High").sum()),
+        "high_risk_pct": float(100 * (risk_df["risk_level"] == "High").sum() / len(risk_df)),
         
-        "medium_risk_count": (risk_df["risk_level"] == "Medium").sum(),
-        "medium_risk_pct": 100 * (risk_df["risk_level"] == "Medium").sum() / len(risk_df),
+        "medium_risk_count": int((risk_df["risk_level"] == "Medium").sum()),
+        "medium_risk_pct": float(100 * (risk_df["risk_level"] == "Medium").sum() / len(risk_df)),
         
         # Score statistics
         "avg_composite_score": float(risk_df["composite_risk_score"].mean()),
@@ -410,8 +417,8 @@ def save_summary_for_tableau(risk_df: pd.DataFrame, risk_results: Dict) -> None:
     """
     LOGGER.info("Creating Tableau-optimized exports...")
     
-    # Transactions with full context
-    tableau_transactions = risk_df[[
+    # Transactions with full context - select only available columns
+    desired_cols = [
         "transactionid",
         "accountid",
         "merchantid",
@@ -429,7 +436,10 @@ def save_summary_for_tableau(risk_df: pd.DataFrame, risk_results: Dict) -> None:
         "lof_score",
         "kmeans_anomaly_score",
         "graph_risk_score",
-    ]].copy()
+    ]
+    
+    available_cols = [c for c in desired_cols if c in risk_df.columns]
+    tableau_transactions = risk_df[available_cols].copy()
     
     save_csv(tableau_transactions, config.REPORTS_DIR / "tableau_transactions.csv")
     

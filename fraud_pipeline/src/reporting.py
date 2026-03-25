@@ -10,7 +10,6 @@ Outputs:
   - OpenAI-generated explanations (optional) to outputs/reports/explanations.json
 """
 
-import os
 import json
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -22,6 +21,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 from . import config
+from .ai_assistant import has_openai_api_key, request_ai_response
 from .utils import LOGGER, save_csv
 
 
@@ -42,30 +42,15 @@ def generate_openai_explanation(prompt: str) -> Optional[str]:
     if not config.USE_OPENAI_EXPLANATIONS:
         return None
     
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
+    if not has_openai_api_key():
         LOGGER.debug("OPENAI_API_KEY not set; skipping OpenAI explanations")
         return None
-    
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a fraud detection analyst. Provide concise, factual explanations."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=150,
-            temperature=0.3,
-        )
-        
-        explanation = response.choices[0].message.content.strip()
-        return explanation
-    except Exception as e:
-        LOGGER.warning(f"OpenAI API call failed: {e}; continuing without explanations")
-        return None
+
+    return request_ai_response(
+        instructions="You are a fraud detection analyst. Provide concise, factual explanations.",
+        prompt=prompt,
+        max_output_tokens=150,
+    )
 
 
 def explain_high_risk_transaction(tx_row: pd.Series, risk_breakdown: Dict) -> Optional[str]:
@@ -525,7 +510,7 @@ def generate_report(
     # ====================================================================
     # OPENAI EXPLANATIONS (Optional)
     # ====================================================================
-    if config.USE_OPENAI_EXPLANATIONS and os.environ.get("OPENAI_API_KEY"):
+    if config.USE_OPENAI_EXPLANATIONS and has_openai_api_key():
         LOGGER.info("Generating OpenAI explanations...")
         explanations = {}
         

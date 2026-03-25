@@ -298,6 +298,7 @@ def risk_scoring(
     df: pd.DataFrame,
     anomaly_scores: pd.DataFrame,
     graph_features: pd.DataFrame,
+    save_output: bool = True,
 ) -> dict:
     """
     Run full risk scoring and ranking pipeline.
@@ -322,14 +323,16 @@ def risk_scoring(
     ip_risk = summarize_ip_risk(risk_ranked)
 
     # Save outputs
-    LOGGER.info("Saving ranking outputs...")
-    save_csv(risk_ranked, config.RISK_TRANSACTIONS_FILE)
-    save_csv(account_risk, config.RISK_ACCOUNTS_FILE)
-    save_csv(merchant_risk, config.REPORTS_DIR / "risk_ranked_merchants.csv")
-    save_csv(device_risk, config.REPORTS_DIR / "risk_ranked_devices.csv")
-    save_csv(ip_risk, config.REPORTS_DIR / "risk_ranked_ips.csv")
-
-    LOGGER.info(f"\nStage 5 complete. Ranking outputs saved to {config.REPORTS_DIR}\n")
+    if save_output:
+        LOGGER.info("Saving ranking outputs...")
+        save_csv(risk_ranked, config.RISK_TRANSACTIONS_FILE)
+        save_csv(account_risk, config.RISK_ACCOUNTS_FILE)
+        save_csv(merchant_risk, config.REPORTS_DIR / "risk_ranked_merchants.csv")
+        save_csv(device_risk, config.REPORTS_DIR / "risk_ranked_devices.csv")
+        save_csv(ip_risk, config.REPORTS_DIR / "risk_ranked_ips.csv")
+        LOGGER.info(f"\nStage 5 complete. Ranking outputs saved to {config.REPORTS_DIR}\n")
+    else:
+        LOGGER.info("\nStage 5 complete. Ranking outputs computed in memory.\n")
 
     return {
         "transactions_ranked": risk_ranked,

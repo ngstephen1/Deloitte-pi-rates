@@ -22,8 +22,10 @@ This pipeline processes Kaggle's Bank Transaction Dataset (2,512 transactions) t
 - **Transparent scoring**: All weights in `config.py` for easy tuning
 - **Production-ready**: Defensive programming, clear function boundaries, logging
 - **Tableau-ready outputs**: All results exported as CSV
-- **Interactive demo**: Streamlit app with filtering, risk breakdown, decision tracking
-- **Optional AI explanations**: OpenAI integration for natural-language risk summaries
+- **Interactive executive demo**: Streamlit dashboard with polished KPI cards, filters, charts, and analyst workflow
+- **CSV upload workflow**: Users can choose a CSV type, validate it, preview it, and analyze raw uploads directly in Streamlit
+- **Optional AI features**: Live recommendations, Q&A, and case explanations powered by `OPENAI_API_KEY`
+- **Persistent review log**: Analyst decisions are stored in a lightweight CSV log with timestamps and versioned updates
 - **Lightweight**: Runs in ~40 seconds on standard laptop; <500MB memory
 
 ## Dataset
@@ -43,14 +45,35 @@ source venv/bin/activate  # macOS/Linux
 # venv\Scripts\activate  # Windows
 
 # Install dependencies
-pip install -r requirements.txt
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
 ```
 
-### 2. Run Backend Pipeline (Steps 1-7)
+### 2. (Optional) Enable AI Features With OPENAI_API_KEY
+
+The app runs without AI. If you want live recommendations, live Q&A, and AI case explanations, export your API key before launching Streamlit:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+AI behavior is controlled in `src/config.py`:
+
+```python
+ENABLE_AI_FEATURES = True
+USE_OPENAI_EXPLANATIONS = False
+OPENAI_MODEL = "gpt-5-mini"
+```
+
+- `ENABLE_AI_FEATURES` controls live Streamlit AI features.
+- `USE_OPENAI_EXPLANATIONS` controls pipeline-time explanation generation into `outputs/reports/openai_explanations.json`.
+- If `OPENAI_API_KEY` is missing, the app keeps working and shows graceful fallback messaging.
+
+### 3. Run Backend Pipeline (Steps 1-7)
 
 ```bash
 # Run full pipeline: ingest → EDA → anomaly detection → graph → risk scoring → reporting
-python run_pipeline.py
+python3 run_pipeline.py
 
 # This will:
 # - Process raw CSV and engineer features
@@ -63,36 +86,38 @@ python run_pipeline.py
 # Output: ~40 seconds, creates files in outputs/
 ```
 
-### 3. (Optional) Enable OpenAI Explanations
-
-If you want natural-language risk explanations:
-
-```bash
-# Set your OpenAI API key
-export OPENAI_API_KEY="sk-..."
-
-# Update config to enable explanations
-# Edit src/config.py: SET USE_OPENAI_EXPLANATIONS = True
-
-# Re-run pipeline (or just call generate_report separately)
-python run_pipeline.py
-```
-
 ### 4. Launch Interactive Streamlit App (Step 8)
 
 ```bash
-# After pipeline completes, launch the analyst review interface
-streamlit run app/streamlit_app.py
+# After pipeline completes, launch the fraud intelligence dashboard
+python3 -m streamlit run app/streamlit_app.py
 
 # Opens at http://localhost:8501
 # Features:
 #  - Executive summary dashboard
-#  - Filter suspicious transactions by risk level, account, merchant
+#  - CSV upload workflow with type selection and validation
+#  - Filter suspicious transactions by risk level, account, merchant, and channel
 #  - View risk component breakdown (IF, LOF, K-Means, graph)
-#  - Read AI-generated explanations
-#  - Record analyst decisions (Approve/Dismiss/Needs Review)
-#  - Export decision log
+#  - Generate AI recommendations and ask live questions about the active dataset
+#  - Generate AI case explanations for transactions, accounts, merchants, and locations
+#  - Record analyst decisions (Approve Flag / Dismiss / Needs Review)
+#  - Persist and export review log
 ```
+
+### 5. Upload CSV Files Directly In Streamlit
+
+Inside the app:
+
+1. Open the `Upload Data` section.
+2. Choose the CSV type first:
+   - `Raw transaction dataset`
+   - `Processed / scored transaction dataset`
+   - `Analyst review log`
+3. Upload the file.
+4. Review the preview, detected columns, row count, and validation result.
+5. Click `Run Fraud Analysis` for raw transaction uploads or `Load Uploaded File` for the other preset types.
+
+For raw uploads, the app runs the existing cleaning, anomaly detection, graph analysis, and risk scoring logic in memory without overwriting your saved pipeline outputs. After a valid file is processed, the app shows a placeholder toast, `Fraud Analysis Report Sent to Chat`, so the future OpenClaw-to-Discord handoff can be connected later without changing the dashboard flow.
 
 ## Project Structure
 
@@ -132,11 +157,14 @@ fraud_pipeline/
 │   ├── graph_analysis.py         # Step 4: NetworkX graph
 │   ├── risk_scoring.py           # Step 5: Composite scoring
 │   ├── reporting.py              # Step 7: Visualizations & summaries
+│   ├── ai_assistant.py           # Shared AI recommendations, Q&A, and explanations
+│   ├── dashboard_data.py         # Upload validation and in-memory dashboard bundles
 │   ├── openai_explanations.py    # Step 7: Optional AI explanations
 │   ├── review_store.py           # Step 6/8: Decision tracking
 │   └── __init__.py
 ├── app/
-│   └── streamlit_app.py          # Step 8: Interactive analyst UI
+│   ├── streamlit_app.py          # Step 8: Interactive analyst UI
+│   └── styles.py                 # Deloitte-style dashboard theme and UI helpers
 ├── run_pipeline.py               # Orchestrator
 ├── validate.py                   # Pre-flight checks
 ├── requirements.txt
@@ -226,38 +254,66 @@ All normalized to [0, 1]; combined via weighted average.
 
 ## Streamlit App Features
 
-**Page 1: Overview**
-- KPI metrics (total, high-risk, volume)
-- Risk distribution pie chart
-- Risk score distribution histogram
-- Pre-generated Plotly charts (account risk, merchant risk, amount vs risk, location risk)
+**Executive Summary**
+- KPI metrics for flagged transactions and high-risk entities
+- Risk posture charts and embedded reporting views
+- Reminder cards derived from current outputs
 
-**Page 2: Suspicious Transactions**
-- Filter by risk level, score, account, merchant
-- View transaction details
-- See risk component breakdown (IF, LOF, K-Means, graph)
-- Read AI-generated risk explanation (if enabled)
-- Record analyst decision with notes
+**Upload Data**
+- CSV type selection before upload
+- Expected-column validation and preview
+- In-memory analysis for raw transaction uploads
+- Direct loading for ranked/report CSVs
 
-**Page 3: Account Risk**
-- Top 20 high-risk accounts
-- Select account → view details & transactions
-- Read account-level risk explanation (if available)
+**Suspicious Transactions**
+- Filter by risk level, score, account, merchant, and channel
+- View transaction-level risk drivers
+- Generate AI case explanation
+- Record analyst decisions with timestamps and updates
 
-**Page 4: Merchants & Locations**
-- Top merchants by avg risk score
-- Top locations by avg risk score
+**Risky Entities**
+- Account, merchant, device, and location views
+- Ranked tables plus explanation support
 
-**Page 5: Review Log**
-- View all analyst decisions
-- Summary counts (Approved/Dismissed/Needs Review)
-- Export decision log as CSV
+**AI Recommendations**
+- Rule-based recommendations grounded in active results
+- Optional AI recommendations when `OPENAI_API_KEY` is set
 
-**Page 6: Pipeline Info**
-- Configuration summary
-- Risk weights & thresholds
-- Data paths
-- Feature overview
+**Ask Questions About Data**
+- Ask investigation questions against the active dataset
+- Answers are grounded in compact summaries of current outputs
+
+**Analyst Review Log**
+- Persistent CSV-backed decision store
+- Summary counts for approved, dismissed, needs review, and unreviewed
+- Versioned updates when a case is reviewed again
+
+**OOF Controls**
+- Operational control priorities for the Office of Oversight and Finance
+- Risk weight and threshold reference tables
+
+## Exact Commands
+
+Run these commands from `fraud_pipeline/`:
+
+```bash
+# 1. Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# 2. Install dependencies
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+
+# 3. Optional: enable live AI features in Streamlit
+export OPENAI_API_KEY="sk-..."
+
+# 4. Optional: run backend pipeline to regenerate saved outputs
+python3 run_pipeline.py
+
+# 5. Launch the Streamlit dashboard
+python3 -m streamlit run app/streamlit_app.py
+```
 
 ## Running Individual Steps
 

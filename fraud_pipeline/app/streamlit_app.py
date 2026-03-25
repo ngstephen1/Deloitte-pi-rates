@@ -3,17 +3,22 @@ Executive Streamlit app for the fraud detection pipeline.
 
 Focus:
   - Premium executive dashboard styling
-  - Analyst review workflow
-  - Robust fallbacks when branding or partial outputs are missing
+  - Upload-driven analysis for demos
+  - AI recommendations, Q&A, and case explanations
+  - Reliable analyst review workflow
 
 Run with: streamlit run app/streamlit_app.py
 """
 
+from __future__ import annotations
+
+import hashlib
 import io
 import json
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict
 
 import pandas as pd
 import plotly.express as px
@@ -25,6 +30,22 @@ import streamlit.components.v1 as components
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src import config
+from src.ai_assistant import (
+    ai_availability_message,
+    answer_data_question,
+    bundle_context_summary,
+    explain_case,
+    generate_ai_recommendations,
+    is_ai_enabled,
+    rule_based_recommendations,
+    rule_based_reminders,
+)
+from src.dashboard_data import (
+    CSV_UPLOAD_OPTIONS,
+    bundle_from_transactions,
+    bundle_from_uploaded_csv,
+    validate_uploaded_csv,
+)
 from src.review_store import ReviewStore
 from styles import (
     BRAND,
@@ -52,12 +73,14 @@ PROJECT_ROOT = Path(__file__).parent.parent
 LOGO_PATH = find_logo_path(PROJECT_ROOT)
 
 NAV_ITEMS = [
-    "Overview",
+    "Executive Summary",
+    "Upload Data",
     "Suspicious Transactions",
-    "Account Risk",
-    "Merchants, Devices & Locations",
-    "Review Log",
-    "Pipeline Info",
+    "Risky Entities",
+    "AI Recommendations",
+    "Ask Questions About Data",
+    "Analyst Review Log",
+    "OOF Controls",
 ]
 RISK_ORDER = ["High", "Medium", "Low"]
 
@@ -73,83 +96,6 @@ def load_figure(figure_name: str):
     if figure_path.exists():
         return figure_path.read_text()
     return None
-
-
-def build_entity_summary(transactions: pd.DataFrame, entity_col: str) -> pd.DataFrame:
-    if entity_col not in transactions.columns or transactions.empty:
-        return pd.DataFrame()
-
-    valid = transactions.dropna(subset=[entity_col]).copy()
-    if valid.empty:
-        return pd.DataFrame()
-
-    summary = valid.groupby(entity_col).agg(
-        avg_risk_score=("composite_risk_score", "mean"),
-        max_risk_score=("composite_risk_score", "max"),
-        transaction_count=("transactionid", "count"),
-        high_risk_count=("risk_level", lambda values: (values == "High").sum()),
-    ).reset_index()
-    summary["high_risk_pct"] = 100 * summary["high_risk_count"] / summary["transaction_count"]
-    return summary.sort_values(["max_risk_score", "avg_risk_score"], ascending=False).reset_index(drop=True)
-
-
-def build_location_summary(transactions: pd.DataFrame) -> pd.DataFrame:
-    return build_entity_summary(transactions, "location")
-
-
-def build_summary_snapshot(
-    transactions: pd.DataFrame,
-    accounts: pd.DataFrame,
-    merchants: pd.DataFrame,
-    devices: pd.DataFrame,
-    locations: pd.DataFrame,
-    file_summary: dict,
-) -> dict:
-    if transactions.empty:
-        return file_summary or {}
-
-    summary = dict(file_summary or {})
-    summary.update(
-        {
-            "total_transactions": int(len(transactions)),
-            "total_accounts": int(transactions["accountid"].nunique(dropna=True)) if "accountid" in transactions else 0,
-            "total_merchants": int(transactions["merchantid"].nunique(dropna=True)) if "merchantid" in transactions else 0,
-            "total_locations": int(transactions["location"].nunique(dropna=True)) if "location" in transactions else 0,
-            "high_risk_count": int((transactions["risk_level"] == "High").sum()),
-            "high_risk_pct": float(100 * (transactions["risk_level"] == "High").mean()),
-            "medium_risk_count": int((transactions["risk_level"] == "Medium").sum()),
-            "medium_risk_pct": float(100 * (transactions["risk_level"] == "Medium").mean()),
-            "avg_composite_score": float(transactions["composite_risk_score"].mean()),
-            "max_composite_score": float(transactions["composite_risk_score"].max()),
-            "median_composite_score": float(transactions["composite_risk_score"].median()),
-            "total_transaction_volume": float(transactions["transactionamount"].sum()),
-            "high_risk_transaction_volume": float(
-                transactions.loc[transactions["risk_level"] == "High", "transactionamount"].sum()
-            ),
-            "flagged_transactions": int(transactions["risk_level"].isin(["High", "Medium"]).sum()),
-            "high_risk_accounts": int(
-                (accounts["account_risk_score"] >= config.RISK_LEVEL_MEDIUM).sum()
-            )
-            if "account_risk_score" in accounts
-            else 0,
-            "high_risk_merchants": int(
-                (merchants["max_risk_score"] >= config.RISK_LEVEL_MEDIUM).sum()
-            )
-            if "max_risk_score" in merchants
-            else 0,
-            "high_risk_devices": int(
-                (devices["max_risk_score"] >= config.RISK_LEVEL_MEDIUM).sum()
-            )
-            if "max_risk_score" in devices
-            else 0,
-            "high_risk_locations": int(
-                (locations["max_risk_score"] >= config.RISK_LEVEL_MEDIUM).sum()
-            )
-            if "max_risk_score" in locations
-            else 0,
-        }
-    )
-    return summary
 
 
 def _enrich_transaction_context(transactions: pd.DataFrame) -> pd.DataFrame:
@@ -178,6 +124,11 @@ def _enrich_transaction_context(transactions: pd.DataFrame) -> pd.DataFrame:
         "loginattempts",
         "transactionduration",
         "transactiontype",
+        "login_attempt_risk",
+        "device_change_flag",
+        "ip_change_flag",
+        "time_since_previous_transaction",
+        "previous_date_regenerated",
     ]
 
     for column in context_columns:
@@ -200,69 +151,57 @@ def _enrich_transaction_context(transactions: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data
-def load_pipeline_outputs():
+def load_pipeline_outputs() -> Dict[str, Any]:
+    transactions = safe_read_csv(config.RISK_TRANSACTIONS_FILE)
+    if transactions.empty:
+        raise FileNotFoundError(config.RISK_TRANSACTIONS_FILE)
+
+    transactions = _enrich_transaction_context(transactions)
+    transactions = transactions.sort_values("composite_risk_score", ascending=False).reset_index(drop=True)
+    bundle = bundle_from_transactions(transactions, "Pipeline outputs")
+
+    accounts = safe_read_csv(config.RISK_ACCOUNTS_FILE)
+    merchants = safe_read_csv(config.REPORTS_DIR / "risk_ranked_merchants.csv")
+    devices = safe_read_csv(config.REPORTS_DIR / "risk_ranked_devices.csv")
+    ips = safe_read_csv(config.REPORTS_DIR / "risk_ranked_ips.csv")
+
+    if not accounts.empty:
+        bundle["accounts"] = accounts
+    if not merchants.empty:
+        bundle["merchants"] = merchants
+    if not devices.empty:
+        bundle["devices"] = devices
+    if not ips.empty:
+        bundle["ips"] = ips
+
+    summary_path = config.REPORTS_DIR / "executive_summary.json"
+    if summary_path.exists():
+        file_summary = json.loads(summary_path.read_text())
+        bundle["summary"] = {**bundle["summary"], **file_summary}
+
+    explanations_path = config.REPORTS_DIR / "openai_explanations.json"
+    bundle["explanations"] = json.loads(explanations_path.read_text()) if explanations_path.exists() else {}
+    bundle["source_label"] = "Pipeline outputs"
+    bundle["uploaded_type"] = "pipeline_outputs"
+    return bundle
+
+
+def get_active_bundle() -> Dict[str, Any]:
     try:
-        transactions = safe_read_csv(config.RISK_TRANSACTIONS_FILE)
-        if transactions.empty:
-            raise FileNotFoundError(config.RISK_TRANSACTIONS_FILE)
-
-        transactions = _enrich_transaction_context(transactions)
-        transactions = transactions.sort_values("composite_risk_score", ascending=False).reset_index(drop=True)
-
-        accounts = safe_read_csv(config.RISK_ACCOUNTS_FILE)
-        merchants = safe_read_csv(config.REPORTS_DIR / "risk_ranked_merchants.csv")
-        devices = safe_read_csv(config.REPORTS_DIR / "risk_ranked_devices.csv")
-        ips = safe_read_csv(config.REPORTS_DIR / "risk_ranked_ips.csv")
-
-        if accounts.empty and {"accountid", "composite_risk_score", "risk_level"}.issubset(transactions.columns):
-            accounts = (
-                transactions.groupby("accountid")
-                .agg(
-                    avg_risk_score=("composite_risk_score", "mean"),
-                    max_risk_score=("composite_risk_score", "max"),
-                    risk_score_std=("composite_risk_score", "std"),
-                    transaction_count=("transactionid", "count"),
-                    high_risk_transaction_count=("risk_level", lambda values: (values == "High").sum()),
-                )
-                .reset_index()
-            )
-            accounts["account_risk_score"] = accounts["max_risk_score"]
-            accounts["high_risk_transaction_pct"] = (
-                100 * accounts["high_risk_transaction_count"] / accounts["transaction_count"]
-            )
-            accounts["account_risk_rank"] = range(1, len(accounts) + 1)
-            accounts = accounts.sort_values("account_risk_score", ascending=False).reset_index(drop=True)
-
-        if merchants.empty:
-            merchants = build_entity_summary(transactions, "merchantid")
-        if devices.empty:
-            devices = build_entity_summary(transactions, "deviceid")
-        if ips.empty:
-            ips = build_entity_summary(transactions, "ip_address")
-
-        locations = build_location_summary(transactions)
-
-        summary_path = config.REPORTS_DIR / "executive_summary.json"
-        file_summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
-        explanations_path = config.REPORTS_DIR / "openai_explanations.json"
-        explanations = json.loads(explanations_path.read_text()) if explanations_path.exists() else {}
-
-        summary = build_summary_snapshot(transactions, accounts, merchants, devices, locations, file_summary)
-
-        return {
-            "transactions": transactions,
-            "accounts": accounts,
-            "merchants": merchants,
-            "devices": devices,
-            "ips": ips,
-            "locations": locations,
-            "summary": summary,
-            "explanations": explanations,
-        }
+        return st.session_state.get("uploaded_bundle") or load_pipeline_outputs()
     except FileNotFoundError as exc:
         st.error(f"Pipeline output missing: {exc}")
         st.info("Run `python3 run_pipeline.py` from `fraud_pipeline/` before opening the dashboard.")
         st.stop()
+
+
+def current_source_label(bundle: Dict[str, Any]) -> str:
+    return bundle.get("source_label", "Pipeline outputs")
+
+
+def bundle_signature(bundle: Dict[str, Any]) -> str:
+    context = bundle_context_summary(bundle)
+    return hashlib.md5(context.encode("utf-8")).hexdigest()
 
 
 def format_currency(value) -> str:
@@ -277,18 +216,19 @@ def format_percent(value) -> str:
     return f"{value:.1f}%" if pd.notna(value) else "N/A"
 
 
-def render_sidebar(page_name: str, data: dict) -> str:
-    summary = data["summary"]
+def render_sidebar(page_name: str, data: Dict[str, Any]) -> str:
+    summary = data.get("summary", {}) or {}
+    active_source = current_source_label(data)
     with st.sidebar:
         st.markdown(
-            """
+            f"""
             <div class="sidebar-panel">
-                <div style="font-size:0.78rem; letter-spacing:0.14em; text-transform:uppercase; color:#b7c6bc; font-weight:800;">
+                <div style="font-size:0.78rem; letter-spacing:0.14em; text-transform:uppercase; color:#d5e1da; font-weight:800;">
                     Navigation
                 </div>
                 <div style="font-size:1.25rem; font-weight:800; margin-top:0.45rem;">Fraud Intelligence</div>
-                <div style="color:#dce5df; margin-top:0.3rem; line-height:1.5;">
-                    Executive monitoring and analyst triage across transactions, entities, and review outcomes.
+                <div style="color:#eef4ef; margin-top:0.35rem; line-height:1.5;">
+                    Executive monitoring, upload triage, AI guidance, and analyst review in one workspace.
                 </div>
             </div>
             """,
@@ -300,62 +240,49 @@ def render_sidebar(page_name: str, data: dict) -> str:
         st.markdown(
             f"""
             <div class="sidebar-panel">
-                <div style="font-size:0.78rem; letter-spacing:0.14em; text-transform:uppercase; color:#b7c6bc; font-weight:800;">
-                    Snapshot
+                <div style="font-size:0.78rem; letter-spacing:0.14em; text-transform:uppercase; color:#d5e1da; font-weight:800;">
+                    Active Source
                 </div>
-                <div style="margin-top:0.7rem;">{badge('High Risk')}</div>
-                <div style="margin-top:0.5rem; color:#eef3ef;">{summary.get('high_risk_count', 0):,} transactions</div>
+                <div style="margin-top:0.55rem; color:#ffffff; font-weight:700;">{active_source}</div>
+                <div style="margin-top:0.85rem;">{badge('High Risk')}</div>
+                <div style="margin-top:0.45rem; color:#eef4ef;">{summary.get('high_risk_count', 0):,} transactions</div>
                 <div style="margin-top:0.85rem;">{badge('Needs Review')}</div>
-                <div style="margin-top:0.5rem; color:#eef3ef;">{summary.get('flagged_transactions', 0):,} flagged items</div>
-                <div style="margin-top:0.85rem; color:#b7c6bc;">Coverage</div>
-                <div style="margin-top:0.35rem; color:#eef3ef;">{summary.get('total_transactions', 0):,} transactions</div>
-                <div style="margin-top:0.25rem; color:#eef3ef;">{summary.get('total_accounts', 0):,} accounts</div>
+                <div style="margin-top:0.45rem; color:#eef4ef;">{summary.get('flagged_transactions', 0):,} flagged items</div>
+                <div style="margin-top:0.85rem; color:#d5e1da;">Coverage</div>
+                <div style="margin-top:0.35rem; color:#eef4ef;">{summary.get('total_transactions', 0):,} transactions</div>
+                <div style="margin-top:0.25rem; color:#eef4ef;">{summary.get('total_accounts', 0):,} accounts</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        st.caption("Wide layout tuned for live presentation and laptop screens.")
-    return selected
-
-
-def render_transactions_filters(transactions: pd.DataFrame) -> pd.DataFrame:
-    with st.sidebar:
         st.markdown(
-            """
+            f"""
             <div class="sidebar-panel">
-                <div style="font-size:0.78rem; letter-spacing:0.14em; text-transform:uppercase; color:#b7c6bc; font-weight:800;">
-                    Transaction Filters
+                <div style="font-size:0.78rem; letter-spacing:0.14em; text-transform:uppercase; color:#d5e1da; font-weight:800;">
+                    AI Status
                 </div>
+                <div style="margin-top:0.55rem;">{badge('Approved Flag' if is_ai_enabled() else 'Needs Review')}</div>
+                <div style="margin-top:0.5rem; color:#eef4ef; line-height:1.45;">{ai_availability_message()}</div>
+            </div>
             """,
             unsafe_allow_html=True,
         )
-        risk_levels = st.multiselect(
-            "Risk Level",
-            options=RISK_ORDER,
-            default=["High", "Medium"],
-        )
-        min_score = st.slider("Minimum Risk Score", 0.0, 1.0, 0.45, 0.01)
-        account_filter = st.text_input("Account ID contains", "")
-        merchant_filter = st.text_input("Merchant ID contains", "")
-        channel_options = sorted(transactions["channel"].dropna().astype(str).unique().tolist()) if "channel" in transactions else []
-        channel_filter = st.multiselect("Channel", options=channel_options, default=channel_options)
-        st.markdown("</div>", unsafe_allow_html=True)
 
-    filtered = transactions[transactions["risk_level"].isin(risk_levels)].copy()
-    filtered = filtered[filtered["composite_risk_score"] >= min_score]
+        if st.session_state.get("uploaded_bundle") is not None:
+            if st.button("Revert to Pipeline Outputs", use_container_width=True):
+                st.session_state.pop("uploaded_bundle", None)
+                st.session_state.pop("qa_history", None)
+                st.rerun()
 
-    if account_filter and "accountid" in filtered:
-        filtered = filtered[filtered["accountid"].astype(str).str.contains(account_filter, case=False, na=False)]
-    if merchant_filter and "merchantid" in filtered:
-        filtered = filtered[filtered["merchantid"].astype(str).str.contains(merchant_filter, case=False, na=False)]
-    if channel_filter and "channel" in filtered:
-        filtered = filtered[filtered["channel"].astype(str).isin(channel_filter)]
-
-    return filtered
+        st.caption("Designed for laptop presentation and live executive walkthroughs.")
+    return selected
 
 
 def display_dataframe(df: pd.DataFrame, formatters: dict | None = None, height: int = 360) -> None:
+    if df.empty:
+        st.info("No data available for this view.")
+        return
     view = df.copy()
     if formatters:
         for column, formatter in formatters.items():
@@ -364,13 +291,334 @@ def display_dataframe(df: pd.DataFrame, formatters: dict | None = None, height: 
     st.dataframe(view, use_container_width=True, hide_index=True, height=height)
 
 
-def page_overview(data: dict) -> None:
-    transactions = data["transactions"]
-    summary = data["summary"]
-    accounts = data["accounts"]
-    merchants = data["merchants"]
-    devices = data["devices"]
-    locations = data["locations"]
+def render_case_explanation(entity_type: str, case_summary: Dict[str, Any], bundle: Dict[str, Any], case_key: str) -> None:
+    cache = st.session_state.setdefault("case_explanations", {})
+    explanation = cache.get(case_key)
+    if explanation is None:
+        explanation = explain_case(entity_type=entity_type, case_summary=case_summary, bundle=bundle)
+        cache[case_key] = explanation
+
+    render_insight(f"<strong>Recommended review focus</strong><br>{explanation['baseline']}")
+    if explanation.get("ai_text"):
+        render_insight(f"<strong>AI Case Explanation</strong><br>{explanation['ai_text']}")
+    elif not explanation.get("ai_available"):
+        st.info(ai_availability_message())
+
+
+def read_uploaded_csv(uploaded_file) -> pd.DataFrame:
+    return pd.read_csv(io.BytesIO(uploaded_file.getvalue()))
+
+
+def get_cached_ai_recommendations(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    cache = st.session_state.setdefault("ai_recommendation_cache", {})
+    signature = bundle_signature(bundle)
+    if signature not in cache:
+        cache[signature] = generate_ai_recommendations(bundle)
+    return cache[signature]
+
+
+def render_upload_validation(validation: Dict[str, Any], upload_type: str) -> None:
+    expected = validation["expected_columns"]
+    missing = validation["missing_columns"]
+    if missing:
+        st.error(
+            f"Validation failed for `{upload_type}`. Missing required columns: {', '.join(missing)}"
+        )
+    else:
+        st.success(f"Validation passed for `{upload_type}`.")
+
+    st.markdown(
+        f"""
+        <div class="insight-card">
+            <strong>Validation result</strong><br>
+            Selected type: {upload_type}<br>
+            Required columns: {', '.join(expected)}<br>
+            Status: {'Valid upload' if not missing else 'Missing required columns'}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_transaction_snapshot(bundle: Dict[str, Any], prefix: str = "upload") -> None:
+    transactions = bundle.get("transactions", pd.DataFrame())
+    accounts = bundle.get("accounts", pd.DataFrame())
+    merchants = bundle.get("merchants", pd.DataFrame())
+    devices = bundle.get("devices", pd.DataFrame())
+    locations = bundle.get("locations", pd.DataFrame())
+    summary = bundle.get("summary", {}) or {}
+
+    if transactions.empty:
+        st.info("No transaction-level results are available for this uploaded file.")
+        return
+
+    render_section_header(
+        "Processed Outputs",
+        "Suspicious transaction ranking, entity hotspots, anomaly signals, and risk score visuals generated from the uploaded file.",
+        kicker="Results",
+    )
+
+    kpi_specs = [
+        ("Flagged Transactions", f"{summary.get('flagged_transactions', 0):,}", "Medium and high risk transactions."),
+        ("High-Risk Accounts", f"{summary.get('high_risk_accounts', 0):,}", "Accounts above the medium-risk threshold."),
+        ("High-Risk Merchants", f"{summary.get('high_risk_merchants', 0):,}", "Merchants concentrated in suspicious activity."),
+        ("High-Risk Devices", f"{summary.get('high_risk_devices', 0):,}", "Devices linked to elevated-risk cases."),
+        ("High-Risk Locations", f"{summary.get('high_risk_locations', 0):,}", "Locations showing the strongest risk clustering."),
+    ]
+    for column, (label, value, note) in zip(st.columns(5), kpi_specs):
+        with column:
+            render_metric_card(label, value, note)
+
+    col1, col2 = st.columns(2, gap="large")
+    with col1:
+        risk_mix = transactions["risk_level"].value_counts().reindex(RISK_ORDER).dropna()
+        if not risk_mix.empty:
+            fig = go.Figure(
+                data=[
+                    go.Pie(
+                        labels=risk_mix.index.tolist(),
+                        values=risk_mix.values.tolist(),
+                        hole=0.58,
+                        marker=dict(colors=[BRAND["danger"], BRAND["warning"], BRAND["green"]]),
+                        textinfo="label+percent",
+                    )
+                ]
+            )
+            fig.update_layout(title="Risk Tier Mix")
+            st.plotly_chart(apply_chart_theme(fig, 360), use_container_width=True)
+
+    with col2:
+        if {"channel", "composite_risk_score", "transactionid"}.issubset(transactions.columns):
+            channel_risk = (
+                transactions.groupby("channel", dropna=False)
+                .agg(avg_risk_score=("composite_risk_score", "mean"), transaction_count=("transactionid", "count"))
+                .reset_index()
+                .sort_values("avg_risk_score", ascending=False)
+            )
+            fig = px.bar(
+                channel_risk,
+                x="channel",
+                y="avg_risk_score",
+                color="avg_risk_score",
+                color_continuous_scale=[[0, BRAND["green_soft"]], [0.55, BRAND["green"]], [1, BRAND["charcoal"]]],
+                title="Average Risk by Channel",
+            )
+            st.plotly_chart(apply_chart_theme(fig, 360), use_container_width=True)
+
+    filter_col1, filter_col2 = st.columns([1.1, 1], gap="large")
+    available_levels = [level for level in RISK_ORDER if level in transactions["risk_level"].dropna().unique().tolist()]
+    with filter_col1:
+        risk_levels = st.multiselect(
+            "Filter risk levels",
+            options=available_levels,
+            default=available_levels[:2] or available_levels,
+            key=f"{prefix}_risk_levels",
+        )
+    with filter_col2:
+        min_score = st.slider(
+            "Minimum composite risk score",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.45,
+            step=0.01,
+            key=f"{prefix}_min_score",
+        )
+
+    filtered = transactions.copy()
+    if risk_levels:
+        filtered = filtered[filtered["risk_level"].isin(risk_levels)]
+    filtered = filtered[filtered["composite_risk_score"] >= min_score]
+
+    render_section_header(
+        "Suspicious Transaction Summary",
+        "Filtered suspicious transactions with anomaly factors and composite risk scores for immediate review.",
+        kicker="Ranked Queue",
+    )
+    suspicious_columns = [
+        column for column in [
+            "transactionid",
+            "accountid",
+            "merchantid",
+            "location",
+            "deviceid",
+            "channel",
+            "transactionamount",
+            "isolation_forest_score",
+            "lof_score",
+            "kmeans_anomaly_score",
+            "graph_risk_score",
+            "composite_risk_score",
+            "risk_level",
+        ] if column in filtered.columns
+    ]
+    display_dataframe(
+        filtered[suspicious_columns].head(25),
+        formatters={
+            "transactionamount": format_currency,
+            "isolation_forest_score": format_score,
+            "lof_score": format_score,
+            "kmeans_anomaly_score": format_score,
+            "graph_risk_score": format_score,
+            "composite_risk_score": format_score,
+        },
+        height=360,
+    )
+
+    if not filtered.empty:
+        selected_tx_id = st.selectbox(
+            "Select suspicious transaction for explanation",
+            options=filtered["transactionid"].astype(str).tolist(),
+            key=f"{prefix}_transaction_explanation",
+        )
+        tx = filtered.loc[filtered["transactionid"].astype(str) == str(selected_tx_id)].iloc[0]
+        render_case_explanation(
+            "transaction",
+            {
+                "transactionid": tx.get("transactionid"),
+                "accountid": tx.get("accountid"),
+                "merchantid": tx.get("merchantid"),
+                "location": tx.get("location"),
+                "channel": tx.get("channel"),
+                "transactionamount": tx.get("transactionamount"),
+                "composite_risk_score": tx.get("composite_risk_score"),
+            },
+            bundle,
+            case_key=f"{prefix}::transaction::{selected_tx_id}",
+        )
+
+    render_section_header(
+        "High-Risk Accounts, Merchants, Locations, and Devices",
+        "Top-ranked entity views produced from the uploaded file for a fast executive walkthrough.",
+        kicker="Entity Hotspots",
+    )
+    tabs = st.tabs(["Accounts", "Merchants", "Locations", "Devices"])
+    with tabs[0]:
+        display_dataframe(
+            accounts.head(15)[[column for column in ["accountid", "account_risk_score", "transaction_count", "high_risk_transaction_count"] if column in accounts.columns]],
+            formatters={"account_risk_score": format_score},
+            height=320,
+        )
+    with tabs[1]:
+        display_dataframe(
+            merchants.head(15)[[column for column in ["merchantid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"] if column in merchants.columns]],
+            formatters={"avg_risk_score": format_score, "max_risk_score": format_score},
+            height=320,
+        )
+    with tabs[2]:
+        display_dataframe(
+            locations.head(15),
+            formatters={"avg_risk_score": format_score, "max_risk_score": format_score, "high_risk_pct": format_percent},
+            height=320,
+        )
+    with tabs[3]:
+        display_dataframe(
+            devices.head(15)[[column for column in ["deviceid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"] if column in devices.columns]],
+            formatters={"avg_risk_score": format_score, "max_risk_score": format_score},
+            height=320,
+        )
+
+
+def render_inline_ai_guidance(bundle: Dict[str, Any], prefix: str = "upload") -> None:
+    render_section_header(
+        "AI Recommendations",
+        "Grounded monitoring guidance, reminders, and business-facing recommendations for the current uploaded dataset.",
+        kicker="AI Guidance",
+    )
+
+    recommendations = get_cached_ai_recommendations(bundle)
+    reminder_columns = st.columns(max(1, len(recommendations["reminders"])))
+    for column, reminder in zip(reminder_columns, recommendations["reminders"]):
+        with column:
+            render_insight(reminder)
+
+    for item in recommendations["baseline_recommendations"]:
+        render_insight(item)
+
+    if recommendations["ai_recommendations"]:
+        for item in recommendations["ai_recommendations"]:
+            render_insight(item)
+    else:
+        st.info(recommendations["availability_message"])
+
+    render_section_header(
+        "Ask Questions About Data",
+        "Ask live questions about the uploaded dataset and get grounded responses tied to the current results.",
+        kicker="Q&A",
+    )
+    question = st.text_input(
+        "Ask about the uploaded data",
+        placeholder="Example: Which merchants appear most often in flagged transactions?",
+        key=f"{prefix}_question_input",
+    )
+    if st.button("Ask About Uploaded Data", key=f"{prefix}_ask_button") and question.strip():
+        response = answer_data_question(question.strip(), bundle)
+        history = st.session_state.setdefault(f"{prefix}_qa_history", [])
+        history.append(
+            {
+                "question": question.strip(),
+                "answer": response["ai_answer"] or response["heuristic_answer"],
+                "used_ai": bool(response["ai_answer"]),
+            }
+        )
+
+    history = st.session_state.get(f"{prefix}_qa_history", [])
+    if history:
+        for item in reversed(history):
+            render_insight(f"<strong>Question</strong><br>{item['question']}")
+            render_insight(f"<strong>Answer</strong><br>{item['answer']}")
+    else:
+        st.info("Ask a question after processing a valid CSV to open a live investigation thread.")
+
+
+def render_uploaded_review_log(bundle: Dict[str, Any]) -> None:
+    review_log = bundle.get("review_log", pd.DataFrame())
+    if review_log.empty:
+        st.info("No analyst review rows were loaded from this upload.")
+        return
+
+    render_section_header(
+        "Review History",
+        "Uploaded analyst decisions, timestamps, and notes for operational review history.",
+        kicker="Review Log",
+    )
+    counts = review_log["decision"].value_counts() if "decision" in review_log.columns else pd.Series(dtype=int)
+    metrics = [
+        ("Approved", f"{int(counts.get('Approve Flag', 0)):,}", "Uploaded cases approved for escalation."),
+        ("Dismissed", f"{int(counts.get('Dismiss', 0)):,}", "Uploaded cases dismissed after review."),
+        ("Needs Review", f"{int(counts.get('Needs Review', 0)):,}", "Uploaded cases still awaiting closure."),
+        ("Rows", f"{len(review_log):,}", "Total records loaded from the review log."),
+    ]
+    for column, (label, value, note) in zip(st.columns(4), metrics):
+        with column:
+            render_metric_card(label, value, note)
+
+    display_dataframe(
+        review_log[[column for column in ["case_id", "transactionid", "accountid", "decision", "analyst_notes", "created_at", "updated_at", "review_version"] if column in review_log.columns]],
+        height=380,
+    )
+
+
+def render_upload_outputs(bundle: Dict[str, Any]) -> None:
+    uploaded_type = bundle.get("uploaded_type")
+    if uploaded_type in {"raw_transaction_dataset", "transactions"}:
+        render_transaction_snapshot(bundle)
+        render_inline_ai_guidance(bundle)
+        return
+
+    if uploaded_type == "review_log":
+        render_uploaded_review_log(bundle)
+        return
+
+    st.info("Uploaded data was loaded successfully, but there is no dedicated dashboard renderer for this type yet.")
+
+
+def page_overview(bundle: Dict[str, Any]) -> None:
+    transactions = bundle.get("transactions", pd.DataFrame())
+    summary = bundle.get("summary", {}) or {}
+    accounts = bundle.get("accounts", pd.DataFrame())
+    merchants = bundle.get("merchants", pd.DataFrame())
+    devices = bundle.get("devices", pd.DataFrame())
+    locations = bundle.get("locations", pd.DataFrame())
 
     render_section_header(
         "Executive Summary",
@@ -380,14 +628,25 @@ def page_overview(data: dict) -> None:
 
     kpi_specs = [
         ("Flagged Transactions", f"{summary.get('flagged_transactions', 0):,}", "Medium and high risk transactions requiring attention."),
-        ("High-Risk Accounts", f"{summary.get('high_risk_accounts', 0):,}", "Accounts with score at or above the medium-risk threshold."),
-        ("High-Risk Merchants", f"{summary.get('high_risk_merchants', 0):,}", "Merchants touching elevated-risk transaction clusters."),
-        ("High-Risk Devices", f"{summary.get('high_risk_devices', 0):,}", "Devices recurring in elevated-risk transaction activity."),
-        ("High-Risk Locations", f"{summary.get('high_risk_locations', 0):,}", "Locations with high-risk transaction exposure."),
+        ("High-Risk Accounts", f"{summary.get('high_risk_accounts', 0):,}", "Accounts with elevated account-level risk scores."),
+        ("High-Risk Merchants", f"{summary.get('high_risk_merchants', 0):,}", "Merchants most associated with suspicious activity."),
+        ("High-Risk Devices", f"{summary.get('high_risk_devices', 0):,}", "Devices recurring in elevated-risk transactions."),
+        ("High-Risk Locations", f"{summary.get('high_risk_locations', 0):,}", "Locations with concentrated suspicious activity."),
     ]
     for column, (label, value, footnote) in zip(st.columns(5), kpi_specs):
         with column:
             render_metric_card(label, value, footnote)
+
+    reminder_cards = rule_based_reminders(bundle)
+    if reminder_cards:
+        reminder_columns = st.columns(len(reminder_cards))
+        for column, message in zip(reminder_columns, reminder_cards):
+            with column:
+                render_insight(message)
+
+    if transactions.empty:
+        st.warning("No transaction-level data is available in the active source.")
+        return
 
     render_section_header(
         "Risk Posture",
@@ -397,12 +656,7 @@ def page_overview(data: dict) -> None:
     col1, col2 = st.columns([1.05, 1], gap="large")
 
     with col1:
-        risk_mix = (
-            transactions["risk_level"]
-            .value_counts()
-            .reindex(RISK_ORDER)
-            .dropna()
-        )
+        risk_mix = transactions["risk_level"].value_counts().reindex(RISK_ORDER).dropna()
         fig = go.Figure(
             data=[
                 go.Pie(
@@ -428,14 +682,14 @@ def page_overview(data: dict) -> None:
             title="Composite Risk Score Distribution",
         )
         fig.update_layout(barmode="overlay")
-        fig.update_traces(opacity=0.7)
+        fig.update_traces(opacity=0.74)
         fig.update_xaxes(range=[0, 1])
         st.plotly_chart(apply_chart_theme(fig, 420), use_container_width=True)
 
     col1, col2 = st.columns(2, gap="large")
     with col1:
         channel_risk = (
-            transactions.groupby("channel")
+            transactions.groupby("channel", dropna=False)
             .agg(avg_risk_score=("composite_risk_score", "mean"), transaction_count=("transactionid", "count"))
             .reset_index()
             .sort_values("avg_risk_score", ascending=False)
@@ -456,12 +710,11 @@ def page_overview(data: dict) -> None:
             x="transactionamount",
             y="composite_risk_score",
             color="risk_level",
-            size_max=12,
             opacity=0.72,
             category_orders={"risk_level": RISK_ORDER},
             color_discrete_map={"High": BRAND["danger"], "Medium": BRAND["warning"], "Low": BRAND["green"]},
             title="Transaction Amount vs Risk Score",
-            hover_data=["transactionid", "accountid", "merchantid"],
+            hover_data=[column for column in ["transactionid", "accountid", "merchantid"] if column in transactions.columns],
         )
         st.plotly_chart(apply_chart_theme(fig, 380), use_container_width=True)
 
@@ -473,46 +726,36 @@ def page_overview(data: dict) -> None:
     tab1, tab2, tab3, tab4 = st.tabs(["Accounts", "Merchants", "Devices", "Locations"])
 
     with tab1:
-        top_accounts = accounts.head(12)[
-            [c for c in ["accountid", "account_risk_score", "high_risk_transaction_count", "transaction_count"] if c in accounts]
-        ]
         display_dataframe(
-            top_accounts,
+            accounts.head(12)[[column for column in ["accountid", "account_risk_score", "high_risk_transaction_count", "transaction_count"] if column in accounts.columns]],
             formatters={"account_risk_score": format_score},
             height=330,
         )
 
     with tab2:
-        top_merchants = merchants.head(12)[
-            [c for c in ["merchantid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"] if c in merchants]
-        ]
         display_dataframe(
-            top_merchants,
+            merchants.head(12)[[column for column in ["merchantid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"] if column in merchants.columns]],
             formatters={"avg_risk_score": format_score, "max_risk_score": format_score},
             height=330,
         )
 
     with tab3:
-        top_devices = devices.head(12)[
-            [c for c in ["deviceid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"] if c in devices]
-        ]
         display_dataframe(
-            top_devices,
+            devices.head(12)[[column for column in ["deviceid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"] if column in devices.columns]],
             formatters={"avg_risk_score": format_score, "max_risk_score": format_score},
             height=330,
         )
 
     with tab4:
-        top_locations = locations.head(12)
         display_dataframe(
-            top_locations,
+            locations.head(12),
             formatters={"avg_risk_score": format_score, "max_risk_score": format_score, "high_risk_pct": format_percent},
             height=330,
         )
 
     render_section_header(
         "Embedded Reporting Views",
-        "Pipeline-generated Plotly artifacts remain available for drill-down during the presentation.",
+        "Existing Plotly artifacts remain available for live drill-down during the presentation.",
         kicker="Artifacts",
     )
     fig_tabs = st.tabs(["Account View", "Merchant View", "Location View", "Component Heatmap"])
@@ -530,16 +773,140 @@ def page_overview(data: dict) -> None:
                 st.info("Figure not available in the current output bundle.")
 
 
-def page_transactions(data: dict) -> None:
-    transactions = data["transactions"]
-    explanations = data["explanations"]
+def page_upload_data() -> None:
+    render_section_header(
+        "Upload Data",
+        "Choose one of the approved CSV presets first, then upload and validate the file before the dashboard processes it.",
+        kicker="Upload Workflow",
+    )
+
+    upload_type = st.radio(
+        "CSV Type",
+        options=CSV_UPLOAD_OPTIONS,
+        index=None,
+        horizontal=True,
+        key="upload_csv_type",
+    )
+
+    if not upload_type:
+        st.info("Choose one CSV type first. The file uploader appears after the selection is made.")
+        return
+
+    uploaded_file = st.file_uploader("Upload CSV", type=["csv"], key=f"uploader_{upload_type}")
+
+    if uploaded_file is None:
+        st.info("Upload a CSV after choosing the dataset type.")
+        return
+
+    raw_df = read_uploaded_csv(uploaded_file)
+    validation = validate_uploaded_csv(raw_df, upload_type)
+    normalized_df = validation["normalized_df"]
+
+    st.success(f"Loaded `{uploaded_file.name}` for review.")
+    st.markdown(
+        f"""
+        <div class="insight-card">
+            <strong>Dataset summary</strong><br>
+            File name: {uploaded_file.name}<br>
+            Selected type: {upload_type}<br>
+            Row count: {len(normalized_df):,}<br>
+            Detected columns: {len(normalized_df.columns):,}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.write("Detected columns")
+    st.code(", ".join(normalized_df.columns.tolist()) or "(none)")
+    render_upload_validation(validation, upload_type)
+
+    render_section_header(
+        "Preview",
+        "Use the preview to confirm the file structure before loading it into the active dashboard context.",
+        kicker="Sanity Check",
+    )
+    display_dataframe(normalized_df.head(25), height=320)
+
+    action_label = "Run Fraud Analysis" if upload_type == "Raw transaction dataset" else "Load Uploaded File"
+
+    if st.button(action_label, disabled=not validation["is_valid"]):
+        try:
+            with st.spinner("Processing uploaded data..."):
+                bundle = bundle_from_uploaded_csv(raw_df, upload_type, f"{upload_type}: {uploaded_file.name}")
+                st.session_state["uploaded_bundle"] = bundle
+                st.session_state.pop("qa_history", None)
+                st.session_state.pop("ai_recommendation_cache", None)
+                st.session_state.pop("upload_qa_history", None)
+            st.success(f"Loaded `{uploaded_file.name}` as the active dashboard source.")
+            st.toast("Fraud Analysis Report Sent to Chat")
+        except Exception as exc:
+            st.error(f"Processing failed: {exc}")
+
+    if st.session_state.get("uploaded_bundle") is not None:
+        active_bundle = st.session_state["uploaded_bundle"]
+        active_summary = active_bundle.get("summary", {}) or {}
+        st.markdown(
+            f"""
+            <div class="insight-card">
+                <strong>Current active source</strong><br>
+                {current_source_label(active_bundle)}<br>
+                Flagged transactions: {active_summary.get('flagged_transactions', 0):,}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        render_upload_outputs(active_bundle)
+
+
+def render_transactions_filters(transactions: pd.DataFrame) -> pd.DataFrame:
+    if transactions.empty:
+        return transactions
+    with st.sidebar:
+        st.markdown(
+            """
+            <div class="sidebar-panel">
+                <div style="font-size:0.78rem; letter-spacing:0.14em; text-transform:uppercase; color:#d5e1da; font-weight:800;">
+                    Transaction Filters
+                </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        available_levels = [level for level in RISK_ORDER if level in transactions["risk_level"].dropna().unique().tolist()]
+        risk_levels = st.multiselect("Risk Level", options=available_levels, default=available_levels[:2] or available_levels)
+        min_score = st.slider("Minimum Risk Score", 0.0, 1.0, 0.45, 0.01)
+        account_filter = st.text_input("Account ID contains", "")
+        merchant_filter = st.text_input("Merchant ID contains", "")
+        channel_options = sorted(transactions["channel"].dropna().astype(str).unique().tolist()) if "channel" in transactions else []
+        channel_filter = st.multiselect("Channel", options=channel_options, default=channel_options)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    filtered = transactions.copy()
+    if risk_levels:
+        filtered = filtered[filtered["risk_level"].isin(risk_levels)]
+    filtered = filtered[filtered["composite_risk_score"] >= min_score]
+
+    if account_filter and "accountid" in filtered:
+        filtered = filtered[filtered["accountid"].astype(str).str.contains(account_filter, case=False, na=False)]
+    if merchant_filter and "merchantid" in filtered:
+        filtered = filtered[filtered["merchantid"].astype(str).str.contains(merchant_filter, case=False, na=False)]
+    if channel_filter and "channel" in filtered:
+        filtered = filtered[filtered["channel"].astype(str).isin(channel_filter)]
+    return filtered
+
+
+def page_transactions(bundle: Dict[str, Any]) -> None:
+    transactions = bundle.get("transactions", pd.DataFrame())
+    explanations = bundle.get("explanations", {}) or {}
     store = ReviewStore()
 
     render_section_header(
         "Suspicious Transactions",
-        "Triage flagged transactions, inspect risk drivers, and record analyst actions without leaving the dashboard.",
+        "Triage flagged transactions, inspect model drivers, ask for case explanations, and record analyst actions without leaving the dashboard.",
         kicker="Analyst Queue",
     )
+
+    if transactions.empty:
+        st.warning("The active source does not include ranked transaction-level data.")
+        return
 
     filtered = render_transactions_filters(transactions)
     st.markdown(
@@ -556,19 +923,19 @@ def page_transactions(data: dict) -> None:
         st.warning("No transactions match the selected filters.")
         return
 
-    queue_view = filtered[
-        [c for c in ["transactionid", "accountid", "merchantid", "location", "channel", "transactionamount", "composite_risk_score", "risk_level"] if c in filtered]
-    ].copy()
-    display_dataframe(
-        queue_view,
-        formatters={"transactionamount": format_currency, "composite_risk_score": format_score},
-        height=350,
-    )
+    queue_view = filtered[[column for column in [
+        "transactionid",
+        "accountid",
+        "merchantid",
+        "location",
+        "channel",
+        "transactionamount",
+        "composite_risk_score",
+        "risk_level",
+    ] if column in filtered.columns]].copy()
+    display_dataframe(queue_view, formatters={"transactionamount": format_currency, "composite_risk_score": format_score}, height=350)
 
-    selected_tx_id = st.selectbox(
-        "Select transaction for investigation",
-        options=filtered["transactionid"].astype(str).tolist(),
-    )
+    selected_tx_id = st.selectbox("Select transaction for investigation", options=filtered["transactionid"].astype(str).tolist())
     tx = filtered.loc[filtered["transactionid"].astype(str) == str(selected_tx_id)].iloc[0]
 
     col1, col2, col3, col4 = st.columns(4, gap="medium")
@@ -600,6 +967,7 @@ def page_transactions(data: dict) -> None:
         "K-Means": float(tx.get("kmeans_anomaly_score", 0) or 0),
         "Graph Risk": float(tx.get("graph_risk_score", 0) or 0),
         "Amount Outlier": float(tx.get("amount_outlier_risk", 0) or 0),
+        "Login Attempt": float(tx.get("login_attempt_risk", 0) or 0),
     }
     breakdown = pd.DataFrame({"component": list(components_map.keys()), "score": list(components_map.values())})
     fig = px.bar(
@@ -614,21 +982,24 @@ def page_transactions(data: dict) -> None:
     fig.update_xaxes(range=[0, 1])
     st.plotly_chart(apply_chart_theme(fig, 360), use_container_width=True)
 
-    st.markdown(
-        f"""
-        <div class="insight-card">
-            <strong>Transaction context</strong><br>
-            Account: {tx.get('accountid', 'N/A')}<br>
-            Merchant: {tx.get('merchantid', 'N/A')}<br>
-            Location: {tx.get('location', 'N/A')}
-        </div>
-        """,
-        unsafe_allow_html=True,
+    render_case_explanation(
+        "transaction",
+        {
+            "transactionid": tx.get("transactionid"),
+            "accountid": tx.get("accountid"),
+            "merchantid": tx.get("merchantid"),
+            "location": tx.get("location"),
+            "channel": tx.get("channel"),
+            "transactionamount": tx.get("transactionamount"),
+            "composite_risk_score": tx.get("composite_risk_score"),
+        },
+        bundle,
+        case_key=f"transaction::{selected_tx_id}",
     )
 
     explanation_key = f"transaction_{selected_tx_id}"
     if explanation_key in explanations:
-        render_insight(f"<strong>AI Explanation</strong><br>{explanations[explanation_key]}")
+        render_insight(f"<strong>Saved pipeline explanation</strong><br>{explanations[explanation_key]}")
 
     render_section_header(
         "Analyst Decision",
@@ -646,7 +1017,7 @@ def page_transactions(data: dict) -> None:
             options=config.DECISION_OPTIONS,
             index=config.DECISION_OPTIONS.index(default_decision),
         )
-        st.markdown(badge("Approved Flag" if decision == "Approve" else decision), unsafe_allow_html=True)
+        st.markdown(badge(decision), unsafe_allow_html=True)
     with note_col:
         notes = st.text_area("Analyst Notes", value=default_notes, height=140)
 
@@ -660,266 +1031,292 @@ def page_transactions(data: dict) -> None:
         st.success("Decision recorded successfully.")
 
 
-def page_accounts(data: dict) -> None:
-    accounts = data["accounts"]
-    transactions = data["transactions"]
-    explanations = data["explanations"]
+def page_entities(bundle: Dict[str, Any]) -> None:
+    accounts = bundle.get("accounts", pd.DataFrame())
+    merchants = bundle.get("merchants", pd.DataFrame())
+    devices = bundle.get("devices", pd.DataFrame())
+    locations = bundle.get("locations", pd.DataFrame())
+    transactions = bundle.get("transactions", pd.DataFrame())
 
     render_section_header(
-        "Account Risk Analysis",
-        "Inspect concentration, transaction patterns, and risk severity at the account level.",
-        kicker="Account View",
-    )
-
-    display_cols = [c for c in ["accountid", "account_risk_score", "max_risk_score", "transaction_count", "high_risk_transaction_count", "high_risk_transaction_pct"] if c in accounts]
-    display_dataframe(
-        accounts.head(20)[display_cols],
-        formatters={
-            "account_risk_score": format_score,
-            "max_risk_score": format_score,
-            "high_risk_transaction_pct": format_percent,
-        },
-        height=360,
-    )
-
-    account_options = accounts["accountid"].dropna().astype(str).tolist()
-    if not account_options:
-        st.warning("No account-level outputs are available.")
-        return
-
-    selected_account = st.selectbox("Select account for detail", options=account_options)
-    account = accounts.loc[accounts["accountid"].astype(str) == str(selected_account)].iloc[0]
-    account_txs = transactions.loc[transactions["accountid"].astype(str) == str(selected_account)].copy()
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        render_detail_card("Account Risk Score", format_score(account.get("account_risk_score")))
-    with col2:
-        render_detail_card("Transaction Count", f"{int(account.get('transaction_count', 0)):,}")
-    with col3:
-        render_detail_card("High-Risk Count", f"{int(account.get('high_risk_transaction_count', 0)):,}")
-    with col4:
-        render_detail_card("High-Risk Mix", format_percent(account.get("high_risk_transaction_pct")))
-
-    if not account_txs.empty:
-        fig = px.bar(
-            account_txs.head(25).sort_values("composite_risk_score"),
-            x="composite_risk_score",
-            y="transactionid",
-            orientation="h",
-            color="risk_level",
-            category_orders={"risk_level": RISK_ORDER},
-            color_discrete_map={"High": BRAND["danger"], "Medium": BRAND["warning"], "Low": BRAND["green"]},
-            title=f"Highest-Risk Transactions for {selected_account}",
-            hover_data=["merchantid", "transactionamount", "channel"],
-        )
-        st.plotly_chart(apply_chart_theme(fig, 520), use_container_width=True)
-
-        display_dataframe(
-            account_txs[
-                [c for c in ["transactionid", "merchantid", "transactionamount", "composite_risk_score", "risk_level", "channel"] if c in account_txs]
-            ].head(50),
-            formatters={"transactionamount": format_currency, "composite_risk_score": format_score},
-            height=360,
-        )
-
-    explanation_key = f"account_{selected_account}"
-    if explanation_key in explanations:
-        render_insight(f"<strong>AI Explanation</strong><br>{explanations[explanation_key]}")
-
-
-def page_entities(data: dict) -> None:
-    merchants = data["merchants"]
-    devices = data["devices"]
-    locations = data["locations"]
-
-    render_section_header(
-        "Merchant, Device, and Location Exposure",
-        "Cross-entity risk concentration for merchant networks, reused devices, and geographic hotspots.",
+        "Risky Accounts, Merchants, Devices, and Locations",
+        "Cross-entity exposure analysis for the highest-risk accounts, merchants, devices, and geographies.",
         kicker="Entity View",
     )
 
-    tabs = st.tabs(["Merchants", "Devices", "Locations"])
+    tabs = st.tabs(["Accounts", "Merchants", "Devices", "Locations"])
 
     with tabs[0]:
-        if merchants.empty:
-            st.info("Merchant summary is not available.")
-        else:
-            fig = px.bar(
-                merchants.head(15).sort_values("avg_risk_score"),
-                x="avg_risk_score",
-                y="merchantid",
-                orientation="h",
-                color="max_risk_score",
-                color_continuous_scale=[[0, BRAND["green_soft"]], [0.55, BRAND["green"]], [1, BRAND["danger"]]],
-                title="Top Merchants by Average Risk Score",
-            )
-            st.plotly_chart(apply_chart_theme(fig, 500), use_container_width=True)
-            display_dataframe(
-                merchants.head(25),
-                formatters={"avg_risk_score": format_score, "max_risk_score": format_score, "high_risk_pct": format_percent},
-                height=360,
-            )
+        display_dataframe(
+            accounts.head(25)[[column for column in ["accountid", "account_risk_score", "max_risk_score", "transaction_count", "high_risk_transaction_count", "high_risk_transaction_pct"] if column in accounts.columns]],
+            formatters={"account_risk_score": format_score, "max_risk_score": format_score, "high_risk_transaction_pct": format_percent},
+            height=360,
+        )
+        if not accounts.empty and not transactions.empty:
+            selected_account = st.selectbox("Select account", options=accounts["accountid"].astype(str).tolist(), key="account_select")
+            account_row = accounts.loc[accounts["accountid"].astype(str) == selected_account].iloc[0]
+            render_case_explanation("account", account_row.to_dict(), bundle, case_key=f"account::{selected_account}")
+            account_txs = transactions.loc[transactions["accountid"].astype(str) == selected_account]
+            if not account_txs.empty:
+                display_dataframe(
+                    account_txs.head(20)[[column for column in ["transactionid", "merchantid", "transactionamount", "composite_risk_score", "risk_level", "channel"] if column in account_txs.columns]],
+                    formatters={"transactionamount": format_currency, "composite_risk_score": format_score},
+                    height=280,
+                )
 
     with tabs[1]:
-        if devices.empty:
-            st.info("Device summary is not available.")
-        else:
-            fig = px.bar(
-                devices.head(15).sort_values("avg_risk_score"),
-                x="avg_risk_score",
-                y="deviceid",
-                orientation="h",
-                color="max_risk_score",
-                color_continuous_scale=[[0, BRAND["green_soft"]], [0.55, BRAND["green"]], [1, BRAND["danger"]]],
-                title="Top Devices by Average Risk Score",
-            )
-            st.plotly_chart(apply_chart_theme(fig, 500), use_container_width=True)
-            display_dataframe(
-                devices.head(25),
-                formatters={"avg_risk_score": format_score, "max_risk_score": format_score, "high_risk_pct": format_percent},
-                height=360,
-            )
+        display_dataframe(
+            merchants.head(25),
+            formatters={"avg_risk_score": format_score, "max_risk_score": format_score, "high_risk_pct": format_percent},
+            height=360,
+        )
+        if not merchants.empty:
+            selected_merchant = st.selectbox("Select merchant", options=merchants["merchantid"].astype(str).tolist(), key="merchant_select")
+            merchant_row = merchants.loc[merchants["merchantid"].astype(str) == selected_merchant].iloc[0]
+            render_case_explanation("merchant", merchant_row.to_dict(), bundle, case_key=f"merchant::{selected_merchant}")
 
     with tabs[2]:
-        if locations.empty:
-            st.info("Location summary is not available.")
-        else:
-            fig = px.bar(
-                locations.head(15).sort_values("avg_risk_score"),
-                x="avg_risk_score",
-                y="location",
-                orientation="h",
-                color="max_risk_score",
-                color_continuous_scale=[[0, BRAND["green_soft"]], [0.55, BRAND["green"]], [1, BRAND["danger"]]],
-                title="Top Locations by Average Risk Score",
-            )
-            st.plotly_chart(apply_chart_theme(fig, 500), use_container_width=True)
-            display_dataframe(
-                locations.head(25),
-                formatters={"avg_risk_score": format_score, "max_risk_score": format_score, "high_risk_pct": format_percent},
-                height=360,
+        display_dataframe(
+            devices.head(25),
+            formatters={"avg_risk_score": format_score, "max_risk_score": format_score, "high_risk_pct": format_percent},
+            height=360,
+        )
+        if not devices.empty:
+            top_device = devices.iloc[0]
+            render_insight(
+                f"<strong>Operational note</strong><br>Device {top_device.get('deviceid', 'N/A')} currently leads the device-risk ranking and should be reviewed alongside shared-account patterns."
             )
 
+    with tabs[3]:
+        display_dataframe(
+            locations.head(25),
+            formatters={"avg_risk_score": format_score, "max_risk_score": format_score, "high_risk_pct": format_percent},
+            height=360,
+        )
+        if not locations.empty:
+            selected_location = st.selectbox("Select location", options=locations["location"].astype(str).tolist(), key="location_select")
+            location_row = locations.loc[locations["location"].astype(str) == selected_location].iloc[0]
+            render_case_explanation("location", location_row.to_dict(), bundle, case_key=f"location::{selected_location}")
 
-def page_decisions() -> None:
+
+def page_ai_recommendations(bundle: Dict[str, Any]) -> None:
+    render_section_header(
+        "AI Recommendations",
+        "Dynamic recommendations, reminders, and monitoring insights generated from the active dataset.",
+        kicker="AI Guidance",
+    )
+
+    recommendations = get_cached_ai_recommendations(bundle)
+
+    reminder_columns = st.columns(max(1, len(recommendations["reminders"])))
+    for column, reminder in zip(reminder_columns, recommendations["reminders"]):
+        with column:
+            render_insight(reminder)
+
+    st.markdown("### Rule-Based Recommendations")
+    for item in recommendations["baseline_recommendations"]:
+        render_insight(item)
+
+    st.markdown("### AI Recommendations")
+    if recommendations["ai_recommendations"]:
+        for item in recommendations["ai_recommendations"]:
+            render_insight(item)
+    else:
+        st.info(recommendations["availability_message"])
+
+
+def page_questions(bundle: Dict[str, Any]) -> None:
+    render_section_header(
+        "Ask Questions About Data",
+        "Ask high-level or investigation-specific questions about the active dataset. Answers stay grounded in the ranked outputs and compact data summaries.",
+        kicker="Q&A",
+    )
+
+    st.caption(f"Active data source: {current_source_label(bundle)}")
+    question = st.text_input(
+        "Ask about the current data",
+        placeholder="Example: Which merchants appear most often in flagged transactions?",
+    )
+
+    if st.button("Ask", key="ask_data_question") and question.strip():
+        response = answer_data_question(question.strip(), bundle)
+        history = st.session_state.setdefault("qa_history", [])
+        history.append(
+            {
+                "question": question.strip(),
+                "answer": response["ai_answer"] or response["heuristic_answer"],
+                "used_ai": bool(response["ai_answer"]),
+            }
+        )
+
+    if not st.session_state.get("qa_history"):
+        st.info("Ask a question to start an investigation-oriented Q&A thread.")
+        return
+
+    for item in reversed(st.session_state["qa_history"]):
+        st.markdown(
+            f"""
+            <div class="detail-card" style="margin-bottom:0.9rem;">
+                <div class="detail-label">Question</div>
+                <div class="detail-value" style="font-size:1rem;">{item['question']}</div>
+                <div class="detail-label" style="margin-top:0.9rem;">Answer</div>
+                <div style="margin-top:0.35rem; color:{BRAND['text']}; line-height:1.6;">{item['answer']}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def page_decisions(bundle: Dict[str, Any]) -> None:
     store = ReviewStore()
     decisions = store.get_all_decisions()
+    transactions = bundle.get("transactions", pd.DataFrame())
+    uploaded_review_log = bundle.get("review_log", pd.DataFrame())
 
     render_section_header(
         "Analyst Review Log",
-        "Disposition history for case review, approvals, dismissals, and items still in queue.",
+        "Disposition history for case review, approvals, dismissals, and items still awaiting analyst action.",
         kicker="Governance",
     )
 
-    if decisions.empty:
-        st.info("No analyst decisions recorded yet.")
-        return
+    reviewed_ids = set(decisions["transactionid"].astype(str)) if not decisions.empty and "transactionid" in decisions else set()
+    active_case_ids = set(transactions["transactionid"].astype(str)) if not transactions.empty and "transactionid" in transactions else set()
+    unreviewed_count = len(active_case_ids - reviewed_ids) if active_case_ids else 0
 
-    counts = decisions["decision"].value_counts()
+    counts = decisions["decision"].value_counts() if not decisions.empty else pd.Series(dtype=int)
     metrics = [
-        ("Approved Flags", f"{int(counts.get('Approve', 0)):,}", "Transactions confirmed for escalation or retention."),
+        ("Approved", f"{int(counts.get('Approve Flag', 0)):,}", "Transactions approved for escalation or retention."),
         ("Dismissed", f"{int(counts.get('Dismiss', 0)):,}", "Transactions reviewed and dismissed."),
-        ("Needs Review", f"{int(counts.get('Needs Review', 0)):,}", "Transactions still awaiting final analyst disposition."),
+        ("Needs Review", f"{int(counts.get('Needs Review', 0)):,}", "Transactions explicitly left in review status."),
+        ("Unreviewed", f"{unreviewed_count:,}", "Transactions in the active dataset with no analyst decision yet."),
     ]
-    for column, (label, value, note) in zip(st.columns(3), metrics):
+    for column, (label, value, note) in zip(st.columns(4), metrics):
         with column:
             render_metric_card(label, value, note)
 
-    log_view = decisions.copy()
-    log_view["status"] = log_view["decision"]
-    display_dataframe(log_view[["transactionid", "accountid", "status", "analyst_notes", "timestamp"]], height=380)
+    if not decisions.empty:
+        log_view = decisions.copy()
+        display_dataframe(
+            log_view[[column for column in ["case_id", "transactionid", "accountid", "decision", "analyst_notes", "created_at", "updated_at", "review_version"] if column in log_view.columns]],
+            height=380,
+        )
 
-    csv_buffer = io.StringIO()
-    decisions.to_csv(csv_buffer, index=False)
-    st.download_button(
-        "Download Review Log",
-        data=csv_buffer.getvalue(),
-        file_name=f"review_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv",
-    )
+        csv_buffer = io.StringIO()
+        decisions.to_csv(csv_buffer, index=False)
+        st.download_button(
+            "Download Review Log",
+            data=csv_buffer.getvalue(),
+            file_name=f"review_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("No stored analyst decisions yet. Saving a decision from the Suspicious Transactions page will create the log automatically.")
+
+    if isinstance(uploaded_review_log, pd.DataFrame) and not uploaded_review_log.empty:
+        render_section_header(
+            "Uploaded Review Log Preview",
+            "This is the currently loaded uploaded review log. It does not overwrite the persistent analyst decision store unless you explicitly use it operationally.",
+            kicker="Uploaded Context",
+        )
+        display_dataframe(uploaded_review_log, height=320)
 
 
-def page_info(data: dict) -> None:
-    summary = data["summary"]
+def page_controls(bundle: Dict[str, Any]) -> None:
+    summary = bundle.get("summary", {}) or {}
+    transactions = bundle.get("transactions", pd.DataFrame())
+    recommendations = rule_based_recommendations(bundle)
+
     render_section_header(
-        "Pipeline Information",
-        "Configuration, thresholds, and output paths backing the current executive demo.",
-        kicker="Reference",
+        "Controls and Recommendations for OOF",
+        "Operational control priorities, monitoring focus, and dashboard reference information for the Office of Oversight and Finance.",
+        kicker="Controls",
     )
+
+    for recommendation in recommendations:
+        render_insight(recommendation)
+
+    if not transactions.empty and "channel" in transactions.columns:
+        channel_risk = (
+            transactions.groupby("channel", dropna=False)
+            .agg(avg_risk_score=("composite_risk_score", "mean"), transaction_count=("transactionid", "count"))
+            .reset_index()
+            .sort_values("avg_risk_score", ascending=False)
+        )
+        fig = px.bar(
+            channel_risk,
+            x="channel",
+            y="avg_risk_score",
+            color="avg_risk_score",
+            color_continuous_scale=[[0, BRAND["green_soft"]], [0.55, BRAND["green"]], [1, BRAND["danger"]]],
+            title="Control Priorities by Channel",
+        )
+        st.plotly_chart(apply_chart_theme(fig, 360), use_container_width=True)
 
     col1, col2 = st.columns(2, gap="large")
     with col1:
         weights_df = pd.DataFrame(
             [{"Component": component, "Weight": weight} for component, weight in config.RISK_WEIGHTS.items()]
         )
-        display_dataframe(weights_df, formatters={"Weight": lambda value: f"{value:.2f}"}, height=320)
-
+        display_dataframe(weights_df, formatters={"Weight": lambda value: f"{value:.2f}"}, height=300)
     with col2:
         thresholds_df = pd.DataFrame(
             [
                 {"Threshold": "Low Risk Upper Bound", "Value": config.RISK_LEVEL_LOW},
                 {"Threshold": "Medium Risk Upper Bound", "Value": config.RISK_LEVEL_MEDIUM},
                 {"Threshold": "High Risk Upper Bound", "Value": config.RISK_LEVEL_HIGH},
-                {"Threshold": "High-Risk Share", "Value": summary.get("high_risk_pct", 0) / 100},
+                {"Threshold": "Current High-Risk Share", "Value": summary.get("high_risk_pct", 0) / 100},
             ]
         )
-        display_dataframe(thresholds_df, formatters={"Value": lambda value: f"{value:.2f}"}, height=320)
+        display_dataframe(thresholds_df, formatters={"Value": lambda value: f"{value:.2f}"}, height=300)
 
     st.markdown(
         f"""
         <div class="insight-card">
-            <strong>Data Paths</strong><br>
-            Raw Data: {config.RAW_DATA_FILE}<br>
-            Cleaned Data: {config.CLEANED_DATA_FILE}<br>
-            Ranked Transactions: {config.RISK_TRANSACTIONS_FILE}<br>
-            Ranked Accounts: {config.RISK_ACCOUNTS_FILE}<br>
-            Figures Directory: {config.FIGURES_DIR}<br>
-            Reports Directory: {config.REPORTS_DIR}
+            <strong>Runbook</strong><br>
+            1. Triage top-ranked transactions and accounts first.<br>
+            2. Focus controls on the highest-risk channel, merchant, and location clusters.<br>
+            3. Persist analyst decisions in the review log for repeatable governance.<br>
+            4. Use the AI Q&amp;A section for concise executive summaries tied to the active dataset.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    features_df = pd.DataFrame(
-        {
-            "Capability": [
-                "Unsupervised anomaly detection",
-                "Graph-based transaction analysis",
-                "Composite transparent risk scoring",
-                "Analyst review and decision tracking",
-                "Executive exports and embedded charts",
-                "Optional OpenAI narrative explanations",
-            ]
-        }
-    )
-    display_dataframe(features_df, height=280)
-
 
 def main() -> None:
-    data = load_pipeline_outputs()
-    page = st.session_state.get("selected_page", "Overview")
-    page = render_sidebar(page, data)
+    bundle = get_active_bundle()
+    page = st.session_state.get("selected_page", "Executive Summary")
+    if page not in NAV_ITEMS:
+        page = "Executive Summary"
+    page = render_sidebar(page, bundle)
     st.session_state["selected_page"] = page
 
     render_app_header(
         "Fraud Intelligence Dashboard",
-        "A polished executive monitoring layer for transaction surveillance, entity exposure analysis, and analyst review decisions.",
+        "A polished executive monitoring layer for transaction surveillance, upload-driven analysis, AI guidance, and analyst review decisions.",
         logo_path=LOGO_PATH,
     )
 
-    if page == "Overview":
-        page_overview(data)
+    render_insight(
+        f"<strong>Active dataset</strong><br>{current_source_label(bundle)}"
+    )
+
+    if page == "Executive Summary":
+        page_overview(bundle)
+    elif page == "Upload Data":
+        page_upload_data()
     elif page == "Suspicious Transactions":
-        page_transactions(data)
-    elif page == "Account Risk":
-        page_accounts(data)
-    elif page == "Merchants, Devices & Locations":
-        page_entities(data)
-    elif page == "Review Log":
-        page_decisions()
-    elif page == "Pipeline Info":
-        page_info(data)
+        page_transactions(bundle)
+    elif page == "Risky Entities":
+        page_entities(bundle)
+    elif page == "AI Recommendations":
+        page_ai_recommendations(bundle)
+    elif page == "Ask Questions About Data":
+        page_questions(bundle)
+    elif page == "Analyst Review Log":
+        page_decisions(bundle)
+    elif page == "OOF Controls":
+        page_controls(bundle)
 
 
 if __name__ == "__main__":

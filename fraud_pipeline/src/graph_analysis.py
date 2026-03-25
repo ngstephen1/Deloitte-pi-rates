@@ -194,7 +194,7 @@ def compute_graph_risk_score(graph_features: pd.DataFrame) -> np.ndarray:
     return risk_score
 
 
-def graph_analysis(df: pd.DataFrame) -> Tuple[pd.DataFrame, nx.MultiDiGraph]:
+def graph_analysis(df: pd.DataFrame, save_output: bool = True) -> Tuple[pd.DataFrame, nx.MultiDiGraph]:
     """
     Run full graph-based analysis pipeline.
 
@@ -217,9 +217,11 @@ def graph_analysis(df: pd.DataFrame) -> Tuple[pd.DataFrame, nx.MultiDiGraph]:
 
     # Save
     output_file = config.GRAPH_FEATURES_FILE
-    save_csv(graph_features, output_file)
-
-    LOGGER.info(f"\nStage 4 complete. Graph features saved to {output_file}\n")
+    if save_output:
+        save_csv(graph_features, output_file)
+        LOGGER.info(f"\nStage 4 complete. Graph features saved to {output_file}\n")
+    else:
+        LOGGER.info("\nStage 4 complete. Graph features computed in memory.\n")
 
     return graph_features, G
 

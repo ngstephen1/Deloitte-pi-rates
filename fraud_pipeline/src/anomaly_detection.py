@@ -104,6 +104,12 @@ def run_local_outlier_factor(
     if contamination is None:
         contamination = config.LOF_CONTAMINATION
 
+    n_samples = len(features)
+    if n_samples <= 2:
+        LOGGER.warning("Too few samples for LOF; returning zero scores.")
+        return np.zeros(n_samples)
+    n_neighbors = min(n_neighbors, n_samples - 1)
+
     LOGGER.info(f"Running Local Outlier Factor (n_neighbors={n_neighbors}, contamination={contamination})...")
 
     lof = LocalOutlierFactor(
@@ -139,6 +145,13 @@ def run_kmeans_clustering(
         n_clusters = config.KMEANS_N_CLUSTERS
     if contamination is None:
         contamination = config.KMEANS_CONTAMINATION
+    n_samples = len(features)
+    if n_samples == 0:
+        return np.array([])
+    if n_samples <= 2:
+        LOGGER.warning("Too few samples for K-Means clustering; returning zero scores.")
+        return np.zeros(n_samples)
+    n_clusters = min(n_clusters, max(2, n_samples // 2))
 
     LOGGER.info(f"Running K-Means clustering (n_clusters={n_clusters})...")
 
@@ -174,7 +187,7 @@ def run_kmeans_clustering(
     return anomaly_scores
 
 
-def run_anomaly_detection(df: pd.DataFrame) -> pd.DataFrame:
+def run_anomaly_detection(df: pd.DataFrame, save_output: bool = True) -> pd.DataFrame:
     """
     Run full unsupervised anomaly detection pipeline.
 
@@ -246,9 +259,11 @@ def run_anomaly_detection(df: pd.DataFrame) -> pd.DataFrame:
 
     # Save anomaly scores
     output_file = config.ANOMALY_SCORES_FILE
-    save_csv(anomaly_df, output_file)
-
-    LOGGER.info(f"\nStage 3 complete. Anomaly scores saved to {output_file}\n")
+    if save_output:
+        save_csv(anomaly_df, output_file)
+        LOGGER.info(f"\nStage 3 complete. Anomaly scores saved to {output_file}\n")
+    else:
+        LOGGER.info("\nStage 3 complete. Anomaly scores computed in memory.\n")
 
     return anomaly_df
 

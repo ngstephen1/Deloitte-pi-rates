@@ -64,6 +64,10 @@ def inject_global_styles() -> None:
                 color: var(--brand-text);
             }}
 
+            body, p, li, label, span, div {{
+                color: inherit;
+            }}
+
             div[data-testid="stAppViewContainer"] > .main {{
                 padding-top: 1.25rem;
             }}
@@ -88,7 +92,8 @@ def inject_global_styles() -> None:
             section[data-testid="stSidebar"] .stMultiSelect > label,
             section[data-testid="stSidebar"] .stSlider > label,
             section[data-testid="stSidebar"] .stTextInput > label,
-            section[data-testid="stSidebar"] .stSelectbox > label {{
+            section[data-testid="stSidebar"] .stSelectbox > label,
+            section[data-testid="stSidebar"] .stFileUploader > label {{
                 color: #dfe8e2;
                 font-weight: 600;
             }}
@@ -442,6 +447,12 @@ def inject_global_styles() -> None:
                 background: linear-gradient(135deg, #93cc30 0%, #abd95a 100%);
             }}
 
+            .stButton > button p,
+            .stDownloadButton > button p {{
+                color: #111715 !important;
+                font-weight: 800 !important;
+            }}
+
             .stTextInput input,
             .stNumberInput input,
             .stSelectbox [data-baseweb="select"] > div,
@@ -450,6 +461,20 @@ def inject_global_styles() -> None:
                 border-radius: 14px !important;
                 border: 1px solid rgba(27,31,30,0.12) !important;
                 background: rgba(255,255,255,0.94) !important;
+                color: var(--brand-charcoal) !important;
+            }}
+
+            .stTextInput label,
+            .stTextArea label,
+            .stSelectbox label,
+            .stMultiSelect label,
+            .stSlider label,
+            .stFileUploader label,
+            .stRadio label,
+            .stMarkdown,
+            .stCaption,
+            .stCodeBlock {{
+                color: var(--brand-text) !important;
             }}
 
             .stSlider [data-baseweb="slider"] > div > div {{
@@ -459,6 +484,11 @@ def inject_global_styles() -> None:
             .stAlert {{
                 border-radius: 18px;
                 border: 1px solid rgba(27,31,30,0.08);
+            }}
+
+            .stAlert p,
+            .stAlert div {{
+                color: var(--brand-text) !important;
             }}
 
             [data-testid="stDataFrame"] {{
@@ -472,6 +502,11 @@ def inject_global_styles() -> None:
                 background: #eff4f0 !important;
                 color: var(--brand-charcoal) !important;
                 font-weight: 700 !important;
+            }}
+
+            [data-testid="stDataFrame"] tbody tr td,
+            [data-testid="stDataFrame"] tbody tr td div {{
+                color: var(--brand-text) !important;
             }}
 
             @media (max-width: 980px) {{
@@ -592,6 +627,10 @@ def render_insight(message: str) -> None:
 def badge(label: str) -> str:
     badge_class = STATUS_CLASS.get(label, "badge-review")
     return f'<span class="badge {badge_class}">{label}</span>'
+
+
+def render_status_pill(label: str) -> str:
+    return badge(label)
 
 
 def apply_chart_theme(fig, height: Optional[int] = None):

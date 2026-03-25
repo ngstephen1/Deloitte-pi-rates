@@ -27,6 +27,16 @@ class ReviewStore:
             storage_file: Path to CSV for storing decisions (default: config.ANALYST_DECISIONS_FILE)
         """
         self.storage_file = storage_file or config.ANALYST_DECISIONS_FILE
+        self.required_columns = [
+            "case_id",
+            "transactionid",
+            "accountid",
+            "decision",
+            "analyst_notes",
+            "created_at",
+            "updated_at",
+            "review_version",
+        ]
         self.decisions = self._load_decisions()
 
     def _load_decisions(self) -> pd.DataFrame:
@@ -34,19 +44,40 @@ class ReviewStore:
         if self.storage_file.exists():
             try:
                 df = pd.read_csv(self.storage_file)
+                for column in self.required_columns:
+                    if column not in df.columns:
+                        df[column] = "" if column not in {"review_version"} else 1
+                if "timestamp" in df.columns:
+                    df["updated_at"] = df["updated_at"].replace("", pd.NA).fillna(df["timestamp"])
+                    df["created_at"] = df["created_at"].replace("", pd.NA).fillna(df["timestamp"])
+                df["case_id"] = df["case_id"].replace("", pd.NA).fillna(df["transactionid"])
+                df["decision"] = df["decision"].map(self._normalize_decision)
+                df["review_version"] = pd.to_numeric(df["review_version"], errors="coerce").fillna(1).astype(int)
+                df = df[self.required_columns]
                 LOGGER.info(f"Loaded {len(df)} existing analyst decisions from {self.storage_file}")
+                self._ensure_storage_file(df)
                 return df
             except Exception as e:
                 LOGGER.warning(f"Could not load decisions file: {e}; starting fresh")
 
         # Create empty DataFrame with schema
-        return pd.DataFrame(columns=[
-            "transactionid",
-            "accountid",
-            "decision",
-            "analyst_notes",
-            "timestamp",
-        ])
+        empty_df = pd.DataFrame(columns=self.required_columns)
+        self._ensure_storage_file(empty_df)
+        return empty_df
+
+    def _normalize_decision(self, decision: str) -> str:
+        mapping = {
+            "Approve": "Approve Flag",
+            "Approve Flag": "Approve Flag",
+            "Dismiss": "Dismiss",
+            "Needs Review": "Needs Review",
+        }
+        return mapping.get(str(decision), str(decision))
+
+    def _ensure_storage_file(self, df: pd.DataFrame) -> None:
+        self.storage_file.parent.mkdir(parents=True, exist_ok=True)
+        if not self.storage_file.exists():
+            df.to_csv(self.storage_file, index=False)
 
     def record_decision(
         self,
@@ -64,26 +95,37 @@ class ReviewStore:
             decision: One of config.DECISION_OPTIONS (Approve, Dismiss, Needs Review)
             notes: Optional analyst notes
         """
-        if decision not in config.DECISION_OPTIONS:
+        normalized_decision = self._normalize_decision(decision)
+        if normalized_decision not in config.DECISION_OPTIONS:
             raise ValueError(f"Invalid decision: {decision}. Must be one of {config.DECISION_OPTIONS}")
 
         # Check if transaction already has a decision
         existing = self.decisions[self.decisions["transactionid"] == transaction_id]
+        now = datetime.now().isoformat()
 
         new_record = pd.DataFrame({
+            "case_id": [transaction_id],
             "transactionid": [transaction_id],
             "accountid": [account_id],
-            "decision": [decision],
+            "decision": [normalized_decision],
             "analyst_notes": [notes or ""],
-            "timestamp": [datetime.now().isoformat()],
+            "created_at": [now],
+            "updated_at": [now],
+            "review_version": [1],
         })
 
         if len(existing) > 0:
             # Update existing
             idx = existing.index[0]
-            self.decisions.at[idx, "decision"] = decision
+            current_version = int(self.decisions.at[idx, "review_version"]) if pd.notna(self.decisions.at[idx, "review_version"]) else 1
+            self.decisions.at[idx, "case_id"] = transaction_id
+            self.decisions.at[idx, "decision"] = normalized_decision
             self.decisions.at[idx, "analyst_notes"] = notes or ""
-            self.decisions.at[idx, "timestamp"] = datetime.now().isoformat()
+            self.decisions.at[idx, "accountid"] = account_id
+            self.decisions.at[idx, "updated_at"] = now
+            if pd.isna(self.decisions.at[idx, "created_at"]) or self.decisions.at[idx, "created_at"] == "":
+                self.decisions.at[idx, "created_at"] = now
+            self.decisions.at[idx, "review_version"] = current_version + 1
         else:
             # Add new
             self.decisions = pd.concat([self.decisions, new_record], ignore_index=True)
@@ -104,16 +146,22 @@ class ReviewStore:
 
         row = result.iloc[0]
         return {
+            "case_id": row["case_id"],
             "transactionid": row["transactionid"],
             "accountid": row["accountid"],
             "decision": row["decision"],
             "analyst_notes": row["analyst_notes"],
-            "timestamp": row["timestamp"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "review_version": row["review_version"],
         }
 
     def get_all_decisions(self) -> pd.DataFrame:
         """Get all recorded decisions."""
-        return self.decisions.copy()
+        decisions = self.decisions.copy()
+        if "updated_at" in decisions.columns:
+            decisions = decisions.sort_values("updated_at", ascending=False, na_position="last").reset_index(drop=True)
+        return decisions
 
     def get_decisions_by_status(self, decision_type: str) -> pd.DataFrame:
         """
@@ -160,6 +208,7 @@ class ReviewStore:
     def _save_decisions(self) -> None:
         """Save decisions to CSV."""
         self.storage_file.parent.mkdir(parents=True, exist_ok=True)
+        self.decisions = self.decisions[self.required_columns].copy()
         self.decisions.to_csv(self.storage_file, index=False)
         LOGGER.debug(f"Saved {len(self.decisions)} decisions to {self.storage_file}")
 
@@ -188,7 +237,7 @@ if __name__ == "__main__":
     store = ReviewStore()
 
     # Record some sample decisions
-    store.record_decision("TX000001", "AC00001", "Approve", "Normal transaction pattern")
+    store.record_decision("TX000001", "AC00001", "Approve Flag", "Normal transaction pattern")
     store.record_decision("TX000002", "AC00002", "Needs Review", "Unusual amount for account")
     store.record_decision("TX000003", "AC00003", "Dismiss", "Expected merchant")
 

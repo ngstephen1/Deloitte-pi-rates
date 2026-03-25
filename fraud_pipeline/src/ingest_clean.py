@@ -274,32 +274,12 @@ def generate_data_quality_report(df: pd.DataFrame) -> None:
     LOGGER.info("=== END QUALITY REPORT ===\n")
 
 
-def load_and_clean(
-    input_file: Path = None,
+def clean_transactions_dataframe(
+    df: pd.DataFrame,
     output_file: Path = None,
+    save_output: bool = True,
 ) -> pd.DataFrame:
-    """
-    End-to-end data loading and cleaning pipeline.
-
-    Args:
-        input_file: Path to raw CSV (default: config.RAW_DATA_FILE)
-        output_file: Path to save cleaned CSV (default: config.CLEANED_DATA_FILE)
-
-    Returns:
-        Cleaned DataFrame
-    """
-    if input_file is None:
-        input_file = config.RAW_DATA_FILE
-    if output_file is None:
-        output_file = config.CLEANED_DATA_FILE
-
-    LOGGER.info("\n" + "=" * 60)
-    LOGGER.info("STAGE 1: DATA INGESTION & CLEANING")
-    LOGGER.info("=" * 60)
-
-    # Load
-    df = load_raw_data(input_file)
-
+    """Clean and enrich a raw transaction dataframe already loaded in memory."""
     # Clean column names
     df = clean_column_names(df)
 
@@ -322,7 +302,41 @@ def load_and_clean(
     generate_data_quality_report(df)
 
     # Save cleaned data
-    save_csv(df, output_file)
+    if save_output and output_file is not None:
+        save_csv(df, output_file)
+
+    return df
+
+
+def load_and_clean(
+    input_file: Path = None,
+    output_file: Path = None,
+    save_output: bool = True,
+) -> pd.DataFrame:
+    """
+    End-to-end data loading and cleaning pipeline.
+
+    Args:
+        input_file: Path to raw CSV (default: config.RAW_DATA_FILE)
+        output_file: Path to save cleaned CSV (default: config.CLEANED_DATA_FILE)
+        save_output: Persist cleaned CSV to disk when True
+
+    Returns:
+        Cleaned DataFrame
+    """
+    if input_file is None:
+        input_file = config.RAW_DATA_FILE
+    if output_file is None:
+        output_file = config.CLEANED_DATA_FILE
+
+    LOGGER.info("\n" + "=" * 60)
+    LOGGER.info("STAGE 1: DATA INGESTION & CLEANING")
+    LOGGER.info("=" * 60)
+
+    # Load
+    df = load_raw_data(input_file)
+
+    df = clean_transactions_dataframe(df, output_file=output_file, save_output=save_output)
 
     LOGGER.info(f"\nStage 1 complete. Cleaned data saved to {output_file}\n")
 

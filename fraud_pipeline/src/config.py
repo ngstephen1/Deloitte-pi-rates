@@ -123,7 +123,7 @@ RISK_LEVEL_MEDIUM = 0.66
 RISK_LEVEL_HIGH = 1.0
 
 # Decision options
-DECISION_OPTIONS = ["Approve", "Dismiss", "Needs Review"]
+DECISION_OPTIONS = ["Approve Flag", "Dismiss", "Needs Review"]
 
 # ============================================================================
 # OPENAI EXPLANATIONS (Step 7)
@@ -131,7 +131,14 @@ DECISION_OPTIONS = ["Approve", "Dismiss", "Needs Review"]
 # Set to True to enable natural-language explanations via OpenAI API
 # Requires OPENAI_API_KEY environment variable
 # If disabled or API key missing, pipeline still runs without explanations
-USE_OPENAI_EXPLANATIONS = False  # Change to True to enable
+USE_OPENAI_EXPLANATIONS = False  # Pipeline-time explanation generation
+
+# Streamlit AI assistant controls
+ENABLE_AI_FEATURES = True
+OPENAI_MODEL = "gpt-5-mini"
+OPENAI_REASONING_EFFORT = "low"
+AI_MAX_CONTEXT_ROWS = 10
+AI_MAX_OUTPUT_TOKENS = 350
 
 # ============================================================================
 # LOGGING

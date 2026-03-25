@@ -13,7 +13,14 @@ import pandas as pd
 from .. import config
 from ..utils import LOGGER
 from .context_loader import build_review_summary, load_active_bundle, publish_bundle_context
-from .message_formatter import build_alert_message, build_reminder_message, build_report_message
+from .message_formatter import (
+    build_alert_message,
+    build_case_reminder_message,
+    build_decision_update_message,
+    build_qna_message,
+    build_reminder_message,
+    build_report_message,
+)
 from .openclaw_bridge import deliver_message
 
 
@@ -322,10 +329,56 @@ def send_alert_notifications(
 def send_monitoring_reminder(
     bundle: Optional[Dict[str, Any]] = None,
     *,
+    reminder_index: int = 0,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     active_bundle = bundle or load_active_bundle()
-    message = build_reminder_message(active_bundle)
+    if reminder_index > 0:
+        message = build_case_reminder_message(active_bundle, reminder_index=reminder_index)
+    else:
+        message = build_case_reminder_message(active_bundle, reminder_index=0)
+    result = deliver_message(message, dry_run=dry_run)
+    return {
+        "message": message,
+        "delivery": result,
+    }
+
+
+def send_decision_update(
+    *,
+    case_summary: Dict[str, Any],
+    decision: str,
+    notes: str,
+    source_label: str,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    message = build_decision_update_message(
+        case_summary=case_summary,
+        decision=decision,
+        notes=notes,
+        source_label=source_label,
+    )
+    result = deliver_message(message, dry_run=dry_run)
+    return {
+        "message": message,
+        "delivery": result,
+    }
+
+
+def send_qna_update(
+    *,
+    question: str,
+    answer: str,
+    source_label: str,
+    used_ai: bool,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    message = build_qna_message(
+        question=question,
+        answer=answer,
+        source_label=source_label,
+        used_ai=used_ai,
+    )
     result = deliver_message(message, dry_run=dry_run)
     return {
         "message": message,

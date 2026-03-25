@@ -5,9 +5,15 @@ OpenClaw-style ChatOps contracts used by the fraud monitoring integration.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from typing import Any, Dict, Optional
 
 from .. import config
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional during bootstrap
+    load_dotenv = None
 
 WEBHOOK_FORMATS = {"openclaw", "discord"}
 
@@ -24,6 +30,23 @@ def _normalize_webhook_format(value: Optional[str]) -> Optional[str]:
         return None
     normalized = value.strip().lower()
     return normalized if normalized in WEBHOOK_FORMATS else None
+
+
+def _refresh_runtime_env() -> None:
+    if load_dotenv is None:
+        return
+    load_dotenv(config.PROJECT_ROOT.parent / ".env", override=False)
+    load_dotenv(config.PROJECT_ROOT / ".env", override=False)
+
+
+def _runtime_env_text(name: str, fallback: Optional[str] = None) -> Optional[str]:
+    value = os.environ.get(name)
+    if value is None:
+        value = fallback
+    if value is None:
+        return None
+    cleaned = str(value).strip().strip('"').strip("'")
+    return cleaned or None
 
 
 @dataclass
@@ -51,6 +74,7 @@ class ChatOpsMessage:
     text: str
     severity: str = "info"
     facts: list[str] = field(default_factory=list)
+    highlights: list[str] = field(default_factory=list)
     table_title: Optional[str] = None
     table_text: Optional[str] = None
     next_action: Optional[str] = None
@@ -59,20 +83,30 @@ class ChatOpsMessage:
 
 
 def get_default_notification_target() -> Optional[NotificationTarget]:
+    _refresh_runtime_env()
+    discord_webhook_url = _first_non_empty(_runtime_env_text("OPENCLAW_DISCORD_WEBHOOK_URL"), config.OPENCLAW_DISCORD_WEBHOOK_URL)
+
     webhook_url = _first_non_empty(
+        _runtime_env_text("OPENCLAW_WEBHOOK_URL"),
+        _runtime_env_text("OPENCLAW_DEFAULT_WEBHOOK_URL"),
+        discord_webhook_url,
         config.OPENCLAW_WEBHOOK_URL,
         config.OPENCLAW_DEFAULT_WEBHOOK_URL,
-        config.OPENCLAW_DISCORD_WEBHOOK_URL,
+        discord_webhook_url,
     )
     webhook_format = _normalize_webhook_format(
         _first_non_empty(
+            _runtime_env_text("OPENCLAW_WEBHOOK_FORMAT"),
             config.OPENCLAW_WEBHOOK_FORMAT,
-            "discord" if webhook_url == config.OPENCLAW_DISCORD_WEBHOOK_URL and webhook_url else None,
+            "discord" if webhook_url == discord_webhook_url and webhook_url else None,
         )
     )
-    channel_id = _first_non_empty(config.OPENCLAW_DEFAULT_CHANNEL_ID)
-    conversation_id = _first_non_empty(config.OPENCLAW_DEFAULT_CONVERSATION_ID)
-    actor_id = _first_non_empty(config.OPENCLAW_DEFAULT_ACTOR_ID)
+    channel_id = _first_non_empty(_runtime_env_text("OPENCLAW_DEFAULT_CHANNEL_ID"), config.OPENCLAW_DEFAULT_CHANNEL_ID)
+    conversation_id = _first_non_empty(
+        _runtime_env_text("OPENCLAW_DEFAULT_CONVERSATION_ID"),
+        config.OPENCLAW_DEFAULT_CONVERSATION_ID,
+    )
+    actor_id = _first_non_empty(_runtime_env_text("OPENCLAW_DEFAULT_ACTOR_ID"), config.OPENCLAW_DEFAULT_ACTOR_ID)
 
     if not webhook_url and not channel_id and not conversation_id and not actor_id:
         return None

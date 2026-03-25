@@ -10,7 +10,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -32,7 +32,8 @@ except Exception as exc:  # pragma: no cover - import guard for optional depende
 from src import config
 from src.chatops import load_active_bundle
 from src.chatops.alert_service import generate_fraud_alerts
-from src.chatops.message_formatter import build_reminder_message, build_report_message
+from src.chatops.discord_upload_service import inspect_discord_csv_upload, process_saved_csv_upload, save_uploaded_csv
+from src.chatops.message_formatter import build_case_reminder_message, build_report_message
 from src.chatops.query_service import answer_analyst_question
 
 
@@ -40,7 +41,7 @@ def _parse_id_set(raw_value: str) -> set[str]:
     return {item.strip() for item in (raw_value or "").split(",") if item.strip()}
 
 
-def _read_state() -> Dict[str, Dict[str, str]]:
+def _read_state() -> Dict[str, Any]:
     if not config.CHATOPS_DISCORD_STATE_FILE.exists():
         return {"channels": {}}
     try:
@@ -49,22 +50,26 @@ def _read_state() -> Dict[str, Dict[str, str]]:
         return {"channels": {}}
 
 
-def _write_state(state: Dict[str, Dict[str, str]]) -> None:
+def _write_state(state: Dict[str, Any]) -> None:
     config.CHATOPS_DISCORD_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     config.CHATOPS_DISCORD_STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
-def _get_channel_state(state: Dict[str, Dict[str, str]], channel_id: str) -> Dict[str, str]:
+def _get_channel_state(state: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
     channels = state.setdefault("channels", {})
-    return channels.setdefault(
+    channel_state = channels.setdefault(
         channel_id,
         {
             "last_human_at": "",
             "last_proactive_at": "",
             "last_daily_reset": "",
             "proactive_count_today": 0,
+            "reminder_cursor": 0,
+            "pending_upload": None,
         },
     )
+    channel_state.setdefault("pending_upload", None)
+    return channel_state
 
 
 def _reset_daily_counter_if_needed(channel_state: Dict[str, str], now: datetime) -> None:
@@ -91,6 +96,14 @@ def _split_for_discord(text: str, max_chars: int = 1800) -> List[str]:
     return chunks
 
 
+def _summarize_columns(columns: list[str], max_items: int = 8) -> str:
+    if not columns:
+        return "(none)"
+    preview = columns[:max_items]
+    suffix = "..." if len(columns) > max_items else ""
+    return ", ".join(preview) + suffix
+
+
 def _message_allowed(message: discord.Message) -> bool:
     if message.author.bot:
         return False
@@ -112,16 +125,58 @@ def _strip_mention(text: str, bot_user_id: int) -> str:
     return text.replace(f"<@{bot_user_id}>", "").replace(f"<@!{bot_user_id}>", "").strip()
 
 
-def _format_report_text() -> str:
-    bundle = load_active_bundle()
-    message = build_report_message(bundle)
+def _find_csv_attachment(message: discord.Message) -> discord.Attachment | None:
+    for attachment in message.attachments:
+        name = (attachment.filename or attachment.url or "").lower()
+        content_type = (attachment.content_type or "").lower()
+        if name.endswith(".csv") or content_type in {"text/csv", "application/csv", "application/vnd.ms-excel"}:
+            return attachment
+    return None
+
+
+def _looks_like_upload_instruction(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in [
+            "report",
+            "summary",
+            "summarize",
+            "analysis",
+            "analyze",
+            "annotated",
+            "annotate",
+            "csv",
+            "cleaned",
+            "clean",
+            "both",
+            "raw",
+            "processed",
+            "scored",
+            "review log",
+            "recommend",
+            "executive",
+            "triage",
+        ]
+    )
+
+
+def _render_chatops_message(message) -> str:
     lines = [f"**{message.title}**", message.text]
-    lines.extend(f"- {fact}" for fact in message.facts)
-    if message.table_text:
+    if getattr(message, "highlights", None):
+        lines.extend(f"- {item}" for item in message.highlights)
+    if getattr(message, "facts", None):
+        lines.extend(f"- {fact}" for fact in message.facts)
+    if getattr(message, "table_text", None):
         lines.append(f"```{message.table_text}```")
-    if message.next_action:
+    if getattr(message, "next_action", None):
         lines.append(f"Next action: {message.next_action}")
     return "\n".join(lines)
+
+
+def _format_report_text() -> str:
+    bundle = load_active_bundle()
+    return _render_chatops_message(build_report_message(bundle))
 
 
 def _format_alert_digest() -> str:
@@ -137,14 +192,10 @@ def _format_alert_digest() -> str:
     return "\n".join(lines)
 
 
-def _format_reminder_text() -> str:
+def _format_reminder_text(reminder_index: int) -> str:
     bundle = load_active_bundle()
-    message = build_reminder_message(bundle)
-    lines = [f"**{message.title}**", message.text]
-    lines.extend(f"- {fact}" for fact in message.facts)
-    if message.next_action:
-        lines.append(f"Next action: {message.next_action}")
-    return "\n".join(lines)
+    message = build_case_reminder_message(bundle, reminder_index=reminder_index)
+    return _render_chatops_message(message)
 
 
 async def _build_transcript(channel: discord.abc.Messageable, limit: int) -> str:
@@ -163,6 +214,116 @@ async def _build_transcript(channel: discord.abc.Messageable, limit: int) -> str
         author_name = item.author.display_name if hasattr(item.author, "display_name") else item.author.name
         history.append(f"{author_name}: {item.content}")
     return "\n".join(reversed(history))
+
+
+async def _send_reply(message: discord.Message, text: str) -> None:
+    for chunk in _split_for_discord(text):
+        await message.channel.send(chunk)
+
+
+async def _send_reply_with_files(message: discord.Message, text: str, files: list[Path]) -> None:
+    chunks = _split_for_discord(text)
+    discord_files = [discord.File(str(path), filename=path.name) for path in files]
+    if chunks:
+        await message.channel.send(chunks[0], files=discord_files)
+        for chunk in chunks[1:]:
+            await message.channel.send(chunk)
+        return
+    await message.channel.send(files=discord_files)
+
+
+async def _process_pending_upload(
+    *,
+    message: discord.Message,
+    state: Dict[str, Any],
+    channel_state: Dict[str, Any],
+    instruction_text: str,
+) -> bool:
+    pending = channel_state.get("pending_upload")
+    if not pending:
+        return False
+
+    if not _looks_like_upload_instruction(instruction_text):
+        return False
+
+    csv_type = pending.get("selected_type")
+    if not csv_type:
+        await _send_reply(
+            message,
+            "I still need the CSV type before I can process that file. Tell me whether it is a raw transaction dataset, a processed / scored transaction dataset, or an analyst review log.",
+        )
+        return True
+
+    actions = inspect_discord_csv_upload(Path(pending["file_path"]).read_bytes(), pending["file_name"], instruction_text)
+    if not actions["has_goal"]:
+        await _send_reply(
+            message,
+            "Tell me the goal for this upload too, for example `executive summary for OOF`, `merchant triage`, or `location review`, then I’ll generate the artifacts.",
+        )
+        return True
+
+    requested_actions = sorted(set(pending.get("requested_actions", []) + actions["requested_actions"]))
+    result = process_saved_csv_upload(
+        file_path=Path(pending["file_path"]),
+        file_name=pending["file_name"],
+        csv_type=csv_type,
+        requested_actions=requested_actions,
+        goal_text=instruction_text.strip(),
+    )
+    channel_state["pending_upload"] = None
+    _write_state(state)
+    await _send_reply_with_files(message, result["reply_text"], result["files"])
+    return True
+
+
+async def _handle_csv_upload(
+    *,
+    message: discord.Message,
+    state: Dict[str, Any],
+    channel_state: Dict[str, Any],
+    content: str,
+) -> bool:
+    attachment = _find_csv_attachment(message)
+    if not attachment:
+        return False
+
+    file_bytes = await attachment.read()
+    inspection = inspect_discord_csv_upload(file_bytes, attachment.filename, content)
+    stored_path = save_uploaded_csv(file_bytes, file_name=attachment.filename, channel_id=str(message.channel.id))
+
+    channel_state["pending_upload"] = {
+        "file_path": str(stored_path),
+        "file_name": attachment.filename,
+        "selected_type": inspection["selected_type"],
+        "requested_actions": inspection["requested_actions"],
+        "row_count": inspection["row_count"],
+        "columns": inspection["columns"],
+    }
+    _write_state(state)
+
+    if inspection["needs_clarification"]:
+        inferred_type = inspection["selected_type"] or "unknown"
+        preview_text = (
+            f"I loaded `{attachment.filename}` with {inspection['row_count']:,} rows and "
+            f"{len(inspection['columns']):,} columns. "
+            f"Closest preset: `{inferred_type}`. "
+            f"Columns: {_summarize_columns(inspection['columns'])}\n\n"
+            f"{inspection['clarification_message']}"
+        )
+        await _send_reply(message, preview_text)
+        return True
+
+    result = process_saved_csv_upload(
+        file_path=stored_path,
+        file_name=attachment.filename,
+        csv_type=inspection["selected_type"],
+        requested_actions=inspection["requested_actions"],
+        goal_text=inspection["goal_text"],
+    )
+    channel_state["pending_upload"] = None
+    _write_state(state)
+    await _send_reply_with_files(message, result["reply_text"], result["files"])
+    return True
 
 
 token = os.environ.get("DISCORD_BOT_TOKEN")
@@ -197,18 +358,52 @@ async def on_message(message: discord.Message) -> None:
     _write_state(state)
 
     content = message.content.strip()
-    if not content:
-        return
 
     if config.DISCORD_REPLY_ONLY_ON_MENTION:
         if client.user not in message.mentions:
             return
         content = _strip_mention(content, client.user.id)
 
+    try:
+        if await _handle_csv_upload(message=message, state=state, channel_state=channel_state, content=content):
+            return
+
+        if channel_state.get("pending_upload") and content and await _process_pending_upload(
+            message=message,
+            state=state,
+            channel_state=channel_state,
+            instruction_text=content,
+        ):
+            return
+    except Exception as exc:
+        await _send_reply(
+            message,
+            f"I couldn't process that CSV cleanly: {exc}",
+        )
+        return
+
+    if not content:
+        return
+
     lowered = content.lower().strip()
+    if lowered in {"!help", "/help", "help"}:
+        await _send_reply(
+            message,
+            "I can answer grounded fraud questions, send the current fraud report, show active alerts, and process CSV uploads. "
+            "If you upload a CSV, I will ask what you want back if the goal is not clear. "
+            "You can ask for a `report`, `annotated csv`, `cleaned csv`, or `both`.",
+        )
+        return
+
     if lowered in {"/fraud-report", "fraud report", "show fraud report"}:
         for chunk in _split_for_discord(_format_report_text()):
             await message.channel.send(chunk)
+        return
+
+    if lowered in {"!clearupload", "/clear-upload", "clear upload"}:
+        channel_state["pending_upload"] = None
+        _write_state(state)
+        await _send_reply(message, "Cleared the pending CSV upload for this channel.")
         return
 
     if lowered in {"/fraud-alerts", "fraud alerts", "show fraud alerts"}:
@@ -265,11 +460,13 @@ async def proactive_loop() -> None:
         if now - last_proactive_dt < timedelta(minutes=config.OPENCLAW_DISCORD_PROACTIVE_MIN_INTERVAL_MINUTES):
             continue
 
-        for chunk in _split_for_discord(_format_reminder_text()):
+        reminder_cursor = int(channel_state.get("reminder_cursor", 0) or 0)
+        for chunk in _split_for_discord(_format_reminder_text(reminder_cursor)):
             await channel.send(chunk)
 
         channel_state["last_proactive_at"] = now.isoformat()
         channel_state["proactive_count_today"] = int(channel_state.get("proactive_count_today", 0) or 0) + 1
+        channel_state["reminder_cursor"] = reminder_cursor + 1
         _write_state(state)
 
 

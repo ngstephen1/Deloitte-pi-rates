@@ -40,7 +40,13 @@ from src.ai_assistant import (
     rule_based_recommendations,
     rule_based_reminders,
 )
-from src.chatops import publish_and_send_report, publish_bundle_context, send_alert_notifications
+from src.chatops import (
+    publish_and_send_report,
+    publish_bundle_context,
+    send_alert_notifications,
+    send_decision_update,
+    send_qna_update,
+)
 from src.chatops.context_loader import build_review_summary
 from src.dashboard_data import (
     CSV_UPLOAD_OPTIONS,
@@ -232,6 +238,55 @@ def render_chatops_status(result: Dict[str, Any] | None) -> None:
         st.caption("ChatOps delivery completed successfully.")
     elif delivery.delivery_error:
         st.info(f"ChatOps delivery did not complete: {delivery.delivery_error}")
+
+
+def refresh_bundle_review_context(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    review_log = ReviewStore().get_all_decisions()
+    refreshed = {**bundle}
+    refreshed["review_log"] = review_log
+    refreshed["summary"] = {
+        **(bundle.get("summary", {}) or {}),
+        **build_review_summary(refreshed.get("transactions", pd.DataFrame()), review_log),
+    }
+    return refreshed
+
+
+def sync_decision_to_chatops(
+    *,
+    bundle: Dict[str, Any],
+    case_summary: Dict[str, Any],
+    decision: str,
+    notes: str,
+) -> Dict[str, Any]:
+    manifest = publish_bundle_context(bundle, publish_reason="streamlit_decision")
+    if not config.OPENCLAW_STREAMLIT_AUTO_SEND:
+        return {"manifest": manifest, "delivery": None, "message": None}
+    result = send_decision_update(
+        case_summary=case_summary,
+        decision=decision,
+        notes=notes,
+        source_label=current_source_label(bundle),
+    )
+    return {"manifest": manifest, **result}
+
+
+def sync_question_to_chatops(
+    *,
+    bundle: Dict[str, Any],
+    question: str,
+    answer: str,
+    used_ai: bool,
+) -> Dict[str, Any]:
+    manifest = publish_bundle_context(bundle, publish_reason="streamlit_qna")
+    if not config.OPENCLAW_STREAMLIT_AUTO_SEND:
+        return {"manifest": manifest, "delivery": None, "message": None}
+    result = send_qna_update(
+        question=question,
+        answer=answer,
+        source_label=current_source_label(bundle),
+        used_ai=used_ai,
+    )
+    return {"manifest": manifest, **result}
 
 
 def bundle_signature(bundle: Dict[str, Any]) -> str:
@@ -505,21 +560,31 @@ def render_transaction_snapshot(bundle: Dict[str, Any], prefix: str = "upload") 
             options=filtered["transactionid"].astype(str).tolist(),
             key=f"{prefix}_transaction_explanation",
         )
+        selected_state_key = f"{prefix}_selected_tx_id"
+        explanation_toggle_key = f"{prefix}_show_case_explanation"
+        if st.session_state.get(selected_state_key) != selected_tx_id:
+            st.session_state[selected_state_key] = selected_tx_id
+            st.session_state[explanation_toggle_key] = False
         tx = filtered.loc[filtered["transactionid"].astype(str) == str(selected_tx_id)].iloc[0]
-        render_case_explanation(
-            "transaction",
-            {
-                "transactionid": tx.get("transactionid"),
-                "accountid": tx.get("accountid"),
-                "merchantid": tx.get("merchantid"),
-                "location": tx.get("location"),
-                "channel": tx.get("channel"),
-                "transactionamount": tx.get("transactionamount"),
-                "composite_risk_score": tx.get("composite_risk_score"),
-            },
-            bundle,
-            case_key=f"{prefix}::transaction::{selected_tx_id}",
-        )
+        if st.button("Generate Case Explanation", key=f"{prefix}_generate_case_explanation"):
+            st.session_state[explanation_toggle_key] = True
+        if st.session_state.get(explanation_toggle_key):
+            render_case_explanation(
+                "transaction",
+                {
+                    "transactionid": tx.get("transactionid"),
+                    "accountid": tx.get("accountid"),
+                    "merchantid": tx.get("merchantid"),
+                    "location": tx.get("location"),
+                    "channel": tx.get("channel"),
+                    "transactionamount": tx.get("transactionamount"),
+                    "composite_risk_score": tx.get("composite_risk_score"),
+                },
+                bundle,
+                case_key=f"{prefix}::transaction::{selected_tx_id}",
+            )
+        else:
+            st.info("Generate the case explanation on demand to keep the upload workflow responsive.")
 
     render_section_header(
         "High-Risk Accounts, Merchants, Locations, and Devices",
@@ -560,20 +625,27 @@ def render_inline_ai_guidance(bundle: Dict[str, Any], prefix: str = "upload") ->
         kicker="AI Guidance",
     )
 
-    recommendations = get_cached_ai_recommendations(bundle)
-    reminder_columns = st.columns(max(1, len(recommendations["reminders"])))
-    for column, reminder in zip(reminder_columns, recommendations["reminders"]):
-        with column:
-            render_insight(reminder)
+    recommendations_toggle_key = f"{prefix}_show_ai_recommendations"
+    if st.button("Generate AI Recommendations", key=f"{prefix}_generate_ai_recommendations"):
+        st.session_state[recommendations_toggle_key] = True
 
-    for item in recommendations["baseline_recommendations"]:
-        render_insight(item)
+    if st.session_state.get(recommendations_toggle_key):
+        recommendations = get_cached_ai_recommendations(bundle)
+        reminder_columns = st.columns(max(1, len(recommendations["reminders"])))
+        for column, reminder in zip(reminder_columns, recommendations["reminders"]):
+            with column:
+                render_insight(reminder)
 
-    if recommendations["ai_recommendations"]:
-        for item in recommendations["ai_recommendations"]:
+        for item in recommendations["baseline_recommendations"]:
             render_insight(item)
+
+        if recommendations["ai_recommendations"]:
+            for item in recommendations["ai_recommendations"]:
+                render_insight(item)
+        else:
+            st.info(recommendations["availability_message"])
     else:
-        st.info(recommendations["availability_message"])
+        st.info("Generate AI guidance on demand after the analysis load completes.")
 
     render_section_header(
         "Ask Questions About Data",
@@ -587,14 +659,23 @@ def render_inline_ai_guidance(bundle: Dict[str, Any], prefix: str = "upload") ->
     )
     if st.button("Ask About Uploaded Data", key=f"{prefix}_ask_button") and question.strip():
         response = answer_data_question(question.strip(), bundle)
+        answer_text = response["ai_answer"] or response["heuristic_answer"]
         history = st.session_state.setdefault(f"{prefix}_qa_history", [])
         history.append(
             {
                 "question": question.strip(),
-                "answer": response["ai_answer"] or response["heuristic_answer"],
+                "answer": answer_text,
                 "used_ai": bool(response["ai_answer"]),
             }
         )
+        qna_sync = sync_question_to_chatops(
+            bundle=bundle,
+            question=question.strip(),
+            answer=answer_text,
+            used_ai=bool(response["ai_answer"]),
+        )
+        st.session_state["last_chatops_delivery"] = qna_sync
+        render_chatops_status(qna_sync)
 
     history = st.session_state.get(f"{prefix}_qa_history", [])
     if history:
@@ -871,6 +952,15 @@ def page_upload_data() -> None:
                 st.session_state.pop("qa_history", None)
                 st.session_state.pop("ai_recommendation_cache", None)
                 st.session_state.pop("upload_qa_history", None)
+                for state_key in [
+                    "upload_show_ai_recommendations",
+                    "upload_show_case_explanation",
+                    "upload_selected_tx_id",
+                    "upload_transaction_explanation",
+                    "upload_risk_levels",
+                    "upload_min_score",
+                ]:
+                    st.session_state.pop(state_key, None)
                 if isinstance(bundle.get("transactions"), pd.DataFrame) and not bundle.get("transactions").empty:
                     chatops_result = publish_bundle_for_chatops(
                         bundle,
@@ -1074,7 +1164,26 @@ def page_transactions(bundle: Dict[str, Any]) -> None:
             decision=decision,
             notes=notes,
         )
+        updated_bundle = refresh_bundle_review_context(bundle)
+        load_pipeline_outputs.clear()
+        if st.session_state.get("uploaded_bundle") is not None:
+            st.session_state["uploaded_bundle"] = updated_bundle
+        decision_sync = sync_decision_to_chatops(
+            bundle=updated_bundle,
+            case_summary={
+                "transactionid": tx.get("transactionid"),
+                "accountid": tx.get("accountid"),
+                "merchantid": tx.get("merchantid"),
+                "location": tx.get("location"),
+                "channel": tx.get("channel"),
+                "composite_risk_score": tx.get("composite_risk_score"),
+            },
+            decision=decision,
+            notes=notes,
+        )
+        st.session_state["last_chatops_delivery"] = decision_sync
         st.success("Decision recorded successfully.")
+        render_chatops_status(decision_sync)
 
 
 def page_entities(bundle: Dict[str, Any]) -> None:
@@ -1193,14 +1302,23 @@ def page_questions(bundle: Dict[str, Any]) -> None:
 
     if st.button("Ask", key="ask_data_question") and question.strip():
         response = answer_data_question(question.strip(), bundle)
+        answer_text = response["ai_answer"] or response["heuristic_answer"]
         history = st.session_state.setdefault("qa_history", [])
         history.append(
             {
                 "question": question.strip(),
-                "answer": response["ai_answer"] or response["heuristic_answer"],
+                "answer": answer_text,
                 "used_ai": bool(response["ai_answer"]),
             }
         )
+        qna_sync = sync_question_to_chatops(
+            bundle=bundle,
+            question=question.strip(),
+            answer=answer_text,
+            used_ai=bool(response["ai_answer"]),
+        )
+        st.session_state["last_chatops_delivery"] = qna_sync
+        render_chatops_status(qna_sync)
 
     if not st.session_state.get("qa_history"):
         st.info("Ask a question to start an investigation-oriented Q&A thread.")

@@ -128,6 +128,35 @@ def inject_global_styles() -> None:
                 box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
             }}
 
+            .pipeline-frame {{
+                background: linear-gradient(180deg, rgba(255,255,255,0.96) 0%, rgba(244,247,245,0.98) 100%);
+                border: 1px solid rgba(27, 31, 30, 0.08);
+                border-radius: 26px;
+                padding: 1.1rem 1.1rem 0.9rem 1.1rem;
+                box-shadow: var(--shadow-card);
+                margin-bottom: 1.15rem;
+            }}
+
+            .pipeline-frame-title {{
+                color: var(--brand-charcoal);
+                font-weight: 800;
+                font-size: 1.05rem;
+                margin-bottom: 0.25rem;
+            }}
+
+            .pipeline-frame-copy {{
+                color: var(--brand-muted);
+                font-size: 0.96rem;
+                line-height: 1.55;
+                margin-bottom: 0.9rem;
+            }}
+
+            .pipeline-frame-note {{
+                color: var(--brand-muted);
+                font-size: 0.88rem;
+                margin-top: 0.65rem;
+            }}
+
             div[data-testid="stMetric"] {{
                 background: var(--brand-panel);
                 border: 1px solid rgba(27, 31, 30, 0.06);

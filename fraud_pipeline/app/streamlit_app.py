@@ -911,6 +911,33 @@ def page_upload_data() -> None:
         kicker="Upload Workflow",
     )
 
+    pipeline_image_path = PROJECT_ROOT / "pipeline-img.png"
+    if pipeline_image_path.exists():
+        with st.container(border=True):
+            st.markdown(
+                """
+                <div class="pipeline-frame-title">Fraud Pipeline Overview</div>
+                <div class="pipeline-frame-copy">
+                    Use this workflow view as a quick walkthrough of how uploaded data moves from cleaning and anomaly detection
+                    into graph analysis, composite risk scoring, analyst review, reporting, and Discord delivery.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.image(
+                str(pipeline_image_path),
+                caption="Pi-rates fraud analytics pipeline from ingestion through operational delivery.",
+                use_container_width=True,
+            )
+            st.markdown(
+                """
+                <div class="pipeline-frame-note">
+                    This diagram reflects the analysis path used by the dashboard, ranked outputs, AI review support, and ChatOps workflows.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
     upload_type = st.radio(
         "CSV Type",
         options=CSV_UPLOAD_OPTIONS,

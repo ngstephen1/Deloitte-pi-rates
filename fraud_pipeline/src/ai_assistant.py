@@ -732,7 +732,7 @@ def build_deep_case_explanation(
     ai_text = request_ai_response(
         instructions=(
             "You are a senior fraud investigator. Use only the provided evidence. "
-            "Return three sections: Why flagged, Evidence, Analyst next step. "
+            "Return three sections: Why flagged, Evidence, Analyst next step. Elaborate on the next steps if user ask more more questions."
             "Mention model contributors and row-level evidence directly."
         ),
         prompt=prompt,

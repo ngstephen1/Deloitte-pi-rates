@@ -40,6 +40,8 @@ from src.ai_assistant import (
     rule_based_recommendations,
     rule_based_reminders,
 )
+from src.chatops import publish_and_send_report, publish_bundle_context, send_alert_notifications
+from src.chatops.context_loader import build_review_summary
 from src.dashboard_data import (
     CSV_UPLOAD_OPTIONS,
     bundle_from_transactions,
@@ -175,12 +177,21 @@ def load_pipeline_outputs() -> Dict[str, Any]:
         bundle["ips"] = ips
 
     summary_path = config.REPORTS_DIR / "executive_summary.json"
+    review_log = ReviewStore().get_all_decisions()
+    bundle["summary"] = {
+        **bundle["summary"],
+        **build_review_summary(bundle["transactions"], review_log),
+    }
     if summary_path.exists():
         file_summary = json.loads(summary_path.read_text())
-        bundle["summary"] = {**bundle["summary"], **file_summary}
+        bundle["summary"] = {
+            **bundle["summary"],
+            **file_summary,
+        }
 
     explanations_path = config.REPORTS_DIR / "openai_explanations.json"
     bundle["explanations"] = json.loads(explanations_path.read_text()) if explanations_path.exists() else {}
+    bundle["review_log"] = review_log
     bundle["source_label"] = "Pipeline outputs"
     bundle["uploaded_type"] = "pipeline_outputs"
     return bundle
@@ -197,6 +208,30 @@ def get_active_bundle() -> Dict[str, Any]:
 
 def current_source_label(bundle: Dict[str, Any]) -> str:
     return bundle.get("source_label", "Pipeline outputs")
+
+
+def publish_bundle_for_chatops(bundle: Dict[str, Any], *, publish_reason: str, headline: str | None = None) -> Dict[str, Any]:
+    if config.OPENCLAW_STREAMLIT_AUTO_SEND:
+        return publish_and_send_report(bundle, headline=headline, publish_reason=publish_reason)
+    manifest = publish_bundle_context(bundle, publish_reason=publish_reason)
+    return {"manifest": manifest, "delivery": None, "message": None}
+
+
+def render_chatops_status(result: Dict[str, Any] | None) -> None:
+    if not result:
+        return
+    delivery = result.get("delivery")
+    manifest = result.get("manifest") or {}
+    if delivery is None:
+        st.caption(
+            f"Published active context for ChatOps from `{manifest.get('source_label', 'active dashboard context')}`. "
+            "Automatic webhook delivery is disabled."
+        )
+        return
+    if delivery.delivered:
+        st.caption("ChatOps delivery completed successfully.")
+    elif delivery.delivery_error:
+        st.info(f"ChatOps delivery did not complete: {delivery.delivery_error}")
 
 
 def bundle_signature(bundle: Dict[str, Any]) -> str:
@@ -836,8 +871,19 @@ def page_upload_data() -> None:
                 st.session_state.pop("qa_history", None)
                 st.session_state.pop("ai_recommendation_cache", None)
                 st.session_state.pop("upload_qa_history", None)
+                if isinstance(bundle.get("transactions"), pd.DataFrame) and not bundle.get("transactions").empty:
+                    chatops_result = publish_bundle_for_chatops(
+                        bundle,
+                        publish_reason="streamlit_upload",
+                        headline=f"Fraud analysis completed for {uploaded_file.name}.",
+                    )
+                else:
+                    manifest = publish_bundle_context(bundle, publish_reason="streamlit_upload")
+                    chatops_result = {"manifest": manifest, "delivery": None, "message": None}
+                st.session_state["last_chatops_delivery"] = chatops_result
             st.success(f"Loaded `{uploaded_file.name}` as the active dashboard source.")
             st.toast("Fraud Analysis Report Sent to Chat")
+            render_chatops_status(chatops_result)
         except Exception as exc:
             st.error(f"Processing failed: {exc}")
 
@@ -1288,6 +1334,53 @@ def page_controls(bundle: Dict[str, Any]) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    render_section_header(
+        "ChatOps Delivery",
+        "Publish the active fraud context for Discord/OpenClaw, send the latest report digest, or push threshold-based alerts.",
+        kicker="ChatOps",
+    )
+    report_col, alert_col = st.columns(2, gap="large")
+    with report_col:
+        if st.button("Send Latest Report to Chat"):
+            result = publish_bundle_for_chatops(
+                bundle,
+                publish_reason="streamlit_manual_send",
+                headline="Manual fraud report dispatch from the executive dashboard.",
+            )
+            st.session_state["last_chatops_delivery"] = result
+            if result.get("delivery") and result["delivery"].delivered:
+                st.success("Latest fraud report sent to ChatOps.")
+            else:
+                st.info("Report context published. Review the ChatOps status note below for delivery details.")
+    with alert_col:
+        if st.button("Send Active Alerts to Chat"):
+            publish_bundle_context(bundle, publish_reason="streamlit_manual_alerts")
+            alert_result = send_alert_notifications(bundle)
+            st.session_state["last_chatops_alerts"] = alert_result
+            sent_count = sum(
+                1
+                for item in alert_result["deliveries"]
+                if not item.get("skipped") and item.get("delivery") and item["delivery"].delivered
+            )
+            skipped_count = sum(1 for item in alert_result["deliveries"] if item.get("skipped"))
+            st.success(f"Alert dispatch completed. Sent {sent_count} alert(s); skipped {skipped_count} deduped alert(s).")
+
+    render_chatops_status(st.session_state.get("last_chatops_delivery"))
+    if st.session_state.get("last_chatops_alerts"):
+        deliveries = st.session_state["last_chatops_alerts"]["deliveries"]
+        if deliveries:
+            lines = []
+            for item in deliveries:
+                alert = item["alert"]
+                if item.get("skipped"):
+                    lines.append(f"{alert['title']}: skipped ({item.get('reason')})")
+                    continue
+                delivery = item["delivery"]
+                lines.append(
+                    f"{alert['title']}: {'delivered' if delivery.delivered else f'not delivered ({delivery.delivery_error})'}"
+                )
+            st.caption(" | ".join(lines))
 
 
 def main() -> None:

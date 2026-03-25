@@ -25,6 +25,7 @@ This pipeline processes Kaggle's Bank Transaction Dataset (2,512 transactions) t
 - **Interactive executive demo**: Streamlit dashboard with polished KPI cards, filters, charts, and analyst workflow
 - **CSV upload workflow**: Users can choose a CSV type, validate it, preview it, and analyze raw uploads directly in Streamlit
 - **Optional AI features**: Live recommendations, Q&A, and case explanations powered by `OPENAI_API_KEY`
+- **OpenClaw-style ChatOps**: Discord webhook delivery, fraud alerting, proactive reminders, and grounded analyst Q&A against the latest fraud context
 - **Persistent review log**: Analyst decisions are stored in a lightweight CSV log with timestamps and versioned updates
 - **Lightweight**: Runs in ~40 seconds on standard laptop; <500MB memory
 
@@ -55,6 +56,8 @@ The app runs without AI. If you want live recommendations, live Q&A, and AI case
 
 ```bash
 export OPENAI_API_KEY="sk-..."
+export OPENCLAW_OPENAI_MODEL="gpt-5.4"
+export OPENCLAW_OPENAI_REASONING_EFFORT="medium"
 ```
 
 AI behavior is controlled in `src/config.py`:
@@ -68,6 +71,7 @@ OPENAI_MODEL = "gpt-5-mini"
 - `ENABLE_AI_FEATURES` controls live Streamlit AI features.
 - `USE_OPENAI_EXPLANATIONS` controls pipeline-time explanation generation into `outputs/reports/openai_explanations.json`.
 - If `OPENAI_API_KEY` is missing, the app keeps working and shows graceful fallback messaging.
+- The ChatOps bridge reuses `OPENAI_API_KEY` and can use its own GPT-5.4 override through `OPENCLAW_OPENAI_MODEL`.
 
 ### 3. Run Backend Pipeline (Steps 1-7)
 
@@ -102,6 +106,7 @@ python3 -m streamlit run app/streamlit_app.py
 #  - Generate AI case explanations for transactions, accounts, merchants, and locations
 #  - Record analyst decisions (Approve Flag / Dismiss / Needs Review)
 #  - Persist and export review log
+#  - Publish the active fraud context for Discord/OpenClaw and optionally send report digests or alerts
 ```
 
 ### 5. Upload CSV Files Directly In Streamlit
@@ -117,7 +122,55 @@ Inside the app:
 4. Review the preview, detected columns, row count, and validation result.
 5. Click `Run Fraud Analysis` for raw transaction uploads or `Load Uploaded File` for the other preset types.
 
-For raw uploads, the app runs the existing cleaning, anomaly detection, graph analysis, and risk scoring logic in memory without overwriting your saved pipeline outputs. After a valid file is processed, the app shows a placeholder toast, `Fraud Analysis Report Sent to Chat`, so the future OpenClaw-to-Discord handoff can be connected later without changing the dashboard flow.
+For raw uploads, the app runs the existing cleaning, anomaly detection, graph analysis, and risk scoring logic in memory without overwriting your saved pipeline outputs. After a valid file is processed, the app publishes the latest fraud context into `outputs/chatops/active_context/`, attempts a ChatOps delivery when configured, and shows the toast `Fraud Analysis Report Sent to Chat`.
+
+### 6. OpenClaw / Discord ChatOps
+
+The Streamlit dashboard remains the main fraud workspace. The ChatOps layer complements it by:
+
+- publishing the latest active fraud context from Streamlit or saved outputs
+- sending report digests and threshold-based alerts to Discord via webhook
+- supporting grounded analyst Q&A from the latest published fraud context
+- sending proactive monitoring reminders while the Discord companion bot is running
+
+Common environment variables:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+export OPENCLAW_OPENAI_MODEL="gpt-5.4"
+export OPENCLAW_OPENAI_REASONING_EFFORT="medium"
+export OPENCLAW_DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+export OPENCLAW_WEBHOOK_FORMAT="discord"
+export OPENCLAW_STREAMLIT_AUTO_SEND="true"
+export DISCORD_BOT_TOKEN="..."
+export DISCORD_ALLOWED_CHANNEL_IDS="1482399372724539568"
+export DISCORD_ALLOWED_GUILD_IDS="1482399372099452982"
+export OPENCLAW_DISCORD_PROACTIVE_ENABLED="true"
+export OPENCLAW_DISCORD_PROACTIVE_CHANNEL_IDS="1482485873265213571"
+export DISCORD_REPLY_ONLY_ON_MENTION="false"
+```
+
+Manual ChatOps commands:
+
+```bash
+# Preview the report and alert payloads without sending them
+python3 scripts/send_fraud_alerts.py --dry-run
+
+# Send the latest report digest and any active threshold-based alerts
+python3 scripts/send_fraud_alerts.py
+
+# Ignore alert dedupe state for a manual live demo run
+python3 scripts/send_fraud_alerts.py --force
+
+# Ask a grounded analyst question locally against the latest active ChatOps context
+python3 scripts/test_openclaw_chatops.py --question "What are the top 5 suspicious accounts?"
+
+# Ask against saved pipeline outputs instead of the last published Streamlit context
+python3 scripts/test_openclaw_chatops.py --use-pipeline-outputs --question "Show me high-risk items still pending analyst review."
+
+# Run the Discord companion bot for live analyst back-and-forth and proactive reminders
+python3 scripts/openclaw_discord_bot.py
+```
 
 ## Project Structure
 
@@ -159,12 +212,17 @@ fraud_pipeline/
 │   ├── reporting.py              # Step 7: Visualizations & summaries
 │   ├── ai_assistant.py           # Shared AI recommendations, Q&A, and explanations
 │   ├── dashboard_data.py         # Upload validation and in-memory dashboard bundles
+│   ├── chatops/                  # OpenClaw-style ChatOps context, alerting, formatting, delivery, and query services
 │   ├── openai_explanations.py    # Step 7: Optional AI explanations
 │   ├── review_store.py           # Step 6/8: Decision tracking
 │   └── __init__.py
 ├── app/
 │   ├── streamlit_app.py          # Step 8: Interactive analyst UI
 │   └── styles.py                 # Deloitte-style dashboard theme and UI helpers
+├── scripts/
+│   ├── send_fraud_alerts.py      # Manual report/alert trigger for ChatOps
+│   ├── test_openclaw_chatops.py  # Grounded local analyst-question smoke test
+│   └── openclaw_discord_bot.py   # Discord companion bot for live analyst chat and reminders
 ├── run_pipeline.py               # Orchestrator
 ├── validate.py                   # Pre-flight checks
 ├── requirements.txt
@@ -307,12 +365,21 @@ python3 -m pip install -r requirements.txt
 
 # 3. Optional: enable live AI features in Streamlit
 export OPENAI_API_KEY="sk-..."
+export OPENCLAW_OPENAI_MODEL="gpt-5.4"
+export OPENCLAW_OPENAI_REASONING_EFFORT="medium"
 
 # 4. Optional: run backend pipeline to regenerate saved outputs
 python3 run_pipeline.py
 
-# 5. Launch the Streamlit dashboard
+# 5. Optional: preview ChatOps payloads or run a local grounded query
+python3 scripts/send_fraud_alerts.py --dry-run
+python3 scripts/test_openclaw_chatops.py --question "What are the top 5 suspicious accounts?"
+
+# 6. Launch the Streamlit dashboard
 python3 -m streamlit run app/streamlit_app.py
+
+# 7. Optional: start the Discord companion bot for live analyst chat and reminders
+python3 scripts/openclaw_discord_bot.py
 ```
 
 ## Running Individual Steps

@@ -10,15 +10,27 @@ from pathlib import Path
 # PATHS
 # ============================================================================
 PROJECT_ROOT = Path(__file__).parent.parent
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency during install/bootstrap
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv(PROJECT_ROOT.parent / ".env", override=False)
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 FIGURES_DIR = OUTPUT_DIR / "figures"
 REPORTS_DIR = OUTPUT_DIR / "reports"
+CHATOPS_DIR = OUTPUT_DIR / "chatops"
+CHATOPS_ACTIVE_DIR = CHATOPS_DIR / "active_context"
 
 # Ensure directories exist
-for d in [PROCESSED_DATA_DIR, FIGURES_DIR, REPORTS_DIR]:
+for d in [PROCESSED_DATA_DIR, FIGURES_DIR, REPORTS_DIR, CHATOPS_DIR, CHATOPS_ACTIVE_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # Input/Output file paths
@@ -28,7 +40,15 @@ ANOMALY_SCORES_FILE = REPORTS_DIR / "anomaly_scores.csv"
 GRAPH_FEATURES_FILE = REPORTS_DIR / "graph_features.csv"
 RISK_TRANSACTIONS_FILE = REPORTS_DIR / "risk_ranked_transactions.csv"
 RISK_ACCOUNTS_FILE = REPORTS_DIR / "risk_ranked_accounts.csv"
+RISK_MERCHANTS_FILE = REPORTS_DIR / "risk_ranked_merchants.csv"
+RISK_DEVICES_FILE = REPORTS_DIR / "risk_ranked_devices.csv"
+RISK_IPS_FILE = REPORTS_DIR / "risk_ranked_ips.csv"
+TOP_LOCATIONS_FILE = REPORTS_DIR / "top_locations.csv"
+EXECUTIVE_SUMMARY_FILE = REPORTS_DIR / "executive_summary.json"
 ANALYST_DECISIONS_FILE = REPORTS_DIR / "analyst_decisions.csv"
+CHATOPS_MANIFEST_FILE = CHATOPS_ACTIVE_DIR / "manifest.json"
+CHATOPS_ALERT_STATE_FILE = CHATOPS_DIR / "alert_state.json"
+CHATOPS_DISCORD_STATE_FILE = CHATOPS_DIR / "discord_bot_state.json"
 
 # ============================================================================
 # DATA CLEANING PARAMETERS
@@ -143,6 +163,63 @@ OPENAI_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_SECO
 OPENAI_TRANSPORT_PREFERENCE = os.environ.get("OPENAI_TRANSPORT_PREFERENCE", "http")
 AI_MAX_CONTEXT_ROWS = 5
 AI_MAX_OUTPUT_TOKENS = 700
+
+# ============================================================================
+# OPENCLAW / CHATOPS
+# ============================================================================
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _clean_env_text(name: str, default: str = "") -> str:
+    return str(os.environ.get(name, default)).strip().strip('"').strip("'")
+
+
+OPENCLAW_ENABLED = _env_bool("OPENCLAW_ENABLED", True)
+OPENCLAW_STREAMLIT_AUTO_SEND = _env_bool("OPENCLAW_STREAMLIT_AUTO_SEND", True)
+OPENCLAW_PUBLIC_BASE_URL = _clean_env_text("OPENCLAW_PUBLIC_BASE_URL", "http://localhost:3002").rstrip("/")
+OPENCLAW_AGENT = _clean_env_text("OPENCLAW_AGENT", "main")
+OPENCLAW_WEBHOOK_FORMAT = _clean_env_text("OPENCLAW_WEBHOOK_FORMAT", "discord").lower()
+OPENCLAW_DEFAULT_CHANNEL_ID = _clean_env_text("OPENCLAW_DEFAULT_CHANNEL_ID")
+OPENCLAW_DEFAULT_CONVERSATION_ID = _clean_env_text("OPENCLAW_DEFAULT_CONVERSATION_ID")
+OPENCLAW_DEFAULT_ACTOR_ID = _clean_env_text("OPENCLAW_DEFAULT_ACTOR_ID")
+OPENCLAW_DISCORD_WEBHOOK_URL = _clean_env_text("OPENCLAW_DISCORD_WEBHOOK_URL")
+OPENCLAW_WEBHOOK_URL = _clean_env_text("OPENCLAW_WEBHOOK_URL") or OPENCLAW_DISCORD_WEBHOOK_URL
+OPENCLAW_DEFAULT_WEBHOOK_URL = _clean_env_text("OPENCLAW_DEFAULT_WEBHOOK_URL") or OPENCLAW_WEBHOOK_URL
+OPENCLAW_REPORT_TOP_N = int(os.environ.get("OPENCLAW_REPORT_TOP_N", "5"))
+OPENCLAW_ALERT_DEDUPE_HOURS = int(os.environ.get("OPENCLAW_ALERT_DEDUPE_HOURS", "8"))
+OPENCLAW_ALERT_TRANSACTION_CRITICAL_THRESHOLD = float(
+    os.environ.get("OPENCLAW_ALERT_TRANSACTION_CRITICAL_THRESHOLD", "0.8")
+)
+OPENCLAW_ALERT_TRANSACTION_WARNING_THRESHOLD = float(
+    os.environ.get("OPENCLAW_ALERT_TRANSACTION_WARNING_THRESHOLD", str(RISK_LEVEL_MEDIUM))
+)
+OPENCLAW_ALERT_ACCOUNT_THRESHOLD = float(os.environ.get("OPENCLAW_ALERT_ACCOUNT_THRESHOLD", "0.75"))
+OPENCLAW_ALERT_MERCHANT_HIGH_RISK_COUNT = int(os.environ.get("OPENCLAW_ALERT_MERCHANT_HIGH_RISK_COUNT", "2"))
+OPENCLAW_ALERT_DEVICE_HIGH_RISK_COUNT = int(os.environ.get("OPENCLAW_ALERT_DEVICE_HIGH_RISK_COUNT", "1"))
+OPENCLAW_ALERT_LOCATION_FLAGGED_COUNT = int(os.environ.get("OPENCLAW_ALERT_LOCATION_FLAGGED_COUNT", "8"))
+OPENCLAW_ALERT_PENDING_REVIEW_THRESHOLD = int(os.environ.get("OPENCLAW_ALERT_PENDING_REVIEW_THRESHOLD", "12"))
+OPENCLAW_ALERT_MAX_ITEMS = int(os.environ.get("OPENCLAW_ALERT_MAX_ITEMS", "6"))
+
+# ChatOps model defaults stay separate from the lighter dashboard defaults.
+OPENCLAW_OPENAI_MODEL = _clean_env_text("OPENCLAW_OPENAI_MODEL", "gpt-5.4")
+OPENCLAW_OPENAI_REASONING_EFFORT = _clean_env_text("OPENCLAW_OPENAI_REASONING_EFFORT", "medium").lower()
+OPENCLAW_OPENAI_MAX_OUTPUT_TOKENS = int(os.environ.get("OPENCLAW_OPENAI_MAX_OUTPUT_TOKENS", "600"))
+
+# Discord companion bot controls
+DISCORD_REPLY_ONLY_ON_MENTION = _env_bool("DISCORD_REPLY_ONLY_ON_MENTION", False)
+DISCORD_ALLOW_DMS = _env_bool("DISCORD_ALLOW_DMS", True)
+OPENCLAW_DISCORD_PROACTIVE_ENABLED = _env_bool("OPENCLAW_DISCORD_PROACTIVE_ENABLED", False)
+OPENCLAW_DISCORD_PROACTIVE_IDLE_MINUTES = int(os.environ.get("OPENCLAW_DISCORD_PROACTIVE_IDLE_MINUTES", "180"))
+OPENCLAW_DISCORD_PROACTIVE_MIN_INTERVAL_MINUTES = int(
+    os.environ.get("OPENCLAW_DISCORD_PROACTIVE_MIN_INTERVAL_MINUTES", "360")
+)
+OPENCLAW_DISCORD_PROACTIVE_MAX_PER_DAY = int(os.environ.get("OPENCLAW_DISCORD_PROACTIVE_MAX_PER_DAY", "3"))
+OPENCLAW_DISCORD_PROACTIVE_POLL_MINUTES = int(os.environ.get("OPENCLAW_DISCORD_PROACTIVE_POLL_MINUTES", "10"))
+OPENCLAW_DISCORD_MAX_CONTEXT_MESSAGES = int(os.environ.get("OPENCLAW_DISCORD_MAX_CONTEXT_MESSAGES", "8"))
 
 # ============================================================================
 # LOGGING

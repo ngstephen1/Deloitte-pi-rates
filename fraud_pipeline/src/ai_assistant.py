@@ -37,18 +37,27 @@ def ai_availability_message() -> str:
     return f"AI features are available via {config.OPENAI_MODEL}."
 
 
-def _build_response_payload(instructions: str, prompt: str, max_output_tokens: int) -> Dict[str, Any]:
+def _build_response_payload(
+    instructions: str,
+    prompt: str,
+    max_output_tokens: int,
+    *,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+) -> Dict[str, Any]:
+    selected_model = model or config.OPENAI_MODEL
     payload: Dict[str, Any] = {
-        "model": config.OPENAI_MODEL,
+        "model": selected_model,
         "instructions": instructions,
         "input": prompt,
         "max_output_tokens": max_output_tokens,
         "store": False,
         "text": {"verbosity": "low"},
     }
-    reasoning_effort = str(config.OPENAI_REASONING_EFFORT or "").strip().lower()
-    if reasoning_effort and reasoning_effort not in {"none", "default"}:
-        payload["reasoning"] = {"effort": config.OPENAI_REASONING_EFFORT}
+    selected_reasoning = reasoning_effort if reasoning_effort is not None else config.OPENAI_REASONING_EFFORT
+    normalized_reasoning = str(selected_reasoning or "").strip().lower()
+    if normalized_reasoning and normalized_reasoning not in {"none", "default"}:
+        payload["reasoning"] = {"effort": normalized_reasoning}
     return payload
 
 
@@ -112,8 +121,21 @@ def _perform_http_request(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _request_ai_response_http(instructions: str, prompt: str, max_output_tokens: int) -> Optional[str]:
-    payload = _build_response_payload(instructions, prompt, max_output_tokens)
+def _request_ai_response_http(
+    instructions: str,
+    prompt: str,
+    max_output_tokens: int,
+    *,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+) -> Optional[str]:
+    payload = _build_response_payload(
+        instructions,
+        prompt,
+        max_output_tokens,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
     response_payload = _perform_http_request(payload)
     if not response_payload:
         return None
@@ -127,7 +149,13 @@ def _request_ai_response_http(instructions: str, prompt: str, max_output_tokens:
     ).get("reason")
     if response_payload.get("status") == "incomplete" and incomplete_reason == "max_output_tokens":
         retry_tokens = min(max(max_output_tokens * 2, 300), 1200)
-        retry_payload = _build_response_payload(instructions, prompt, retry_tokens)
+        retry_payload = _build_response_payload(
+            instructions,
+            prompt,
+            retry_tokens,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
         retry_response_payload = _perform_http_request(retry_payload)
         if retry_response_payload:
             retry_output = _extract_output_text(retry_response_payload)
@@ -144,19 +172,31 @@ def _request_ai_response_http(instructions: str, prompt: str, max_output_tokens:
     return None
 
 
-def _request_ai_response_sdk(instructions: str, prompt: str, max_output_tokens: int) -> Optional[str]:
+def _request_ai_response_sdk(
+    instructions: str,
+    prompt: str,
+    max_output_tokens: int,
+    *,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+) -> Optional[str]:
     try:
         from openai import OpenAI
 
+        selected_model = model or config.OPENAI_MODEL
+        selected_reasoning = reasoning_effort if reasoning_effort is not None else config.OPENAI_REASONING_EFFORT
         client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-        response = client.responses.create(
-            model=config.OPENAI_MODEL,
-            instructions=instructions,
-            input=prompt,
-            max_output_tokens=max_output_tokens,
-            store=False,
-            reasoning={"effort": config.OPENAI_REASONING_EFFORT} if config.OPENAI_REASONING_EFFORT else None,
-        )
+        request_kwargs: Dict[str, Any] = {
+            "model": selected_model,
+            "instructions": instructions,
+            "input": prompt,
+            "max_output_tokens": max_output_tokens,
+            "store": False,
+        }
+        normalized_reasoning = str(selected_reasoning or "").strip().lower()
+        if normalized_reasoning and normalized_reasoning not in {"none", "default"}:
+            request_kwargs["reasoning"] = {"effort": normalized_reasoning}
+        response = client.responses.create(**request_kwargs)
         output_text = getattr(response, "output_text", None)
         if output_text:
             return output_text.strip()
@@ -171,6 +211,8 @@ def request_ai_response(
     prompt: str,
     *,
     max_output_tokens: int = config.AI_MAX_OUTPUT_TOKENS,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Optional[str]:
     """Call the OpenAI Responses API and return output text when available."""
     if not is_ai_enabled():
@@ -186,9 +228,21 @@ def request_ai_response(
 
     for transport in transports:
         if transport == "http":
-            text = _request_ai_response_http(instructions, prompt, max_output_tokens)
+            text = _request_ai_response_http(
+                instructions,
+                prompt,
+                max_output_tokens,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         else:
-            text = _request_ai_response_sdk(instructions, prompt, max_output_tokens)
+            text = _request_ai_response_sdk(
+                instructions,
+                prompt,
+                max_output_tokens,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         if text:
             return text
     return None
@@ -514,7 +568,15 @@ def _help_intent_answer(bundle: Dict[str, Any]) -> str:
     )
 
 
-def answer_data_question(question: str, bundle: Dict[str, Any]) -> Dict[str, Any]:
+def answer_data_question(
+    question: str,
+    bundle: Dict[str, Any],
+    *,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    extra_context: Optional[str] = None,
+    max_output_tokens: int = 320,
+) -> Dict[str, Any]:
     if _is_help_intent(question):
         help_answer = _help_intent_answer(bundle)
         return {
@@ -525,6 +587,13 @@ def answer_data_question(question: str, bundle: Dict[str, Any]) -> Dict[str, Any
         }
 
     heuristic_answer = heuristic_question_answer(question, bundle)
+    prompt = (
+        f"Question: {question}\n\n"
+        f"Dataset context:\n{bundle_context_summary(bundle, detail='compact')}\n\n"
+    )
+    if extra_context:
+        prompt += f"Additional operational context:\n{extra_context}\n\n"
+    prompt += f"Deterministic grounded answer draft: {heuristic_answer}"
     ai_text = request_ai_response(
         instructions=(
             "You are an enterprise fraud analytics assistant. Answer using only the supplied dataset context. "
@@ -532,12 +601,10 @@ def answer_data_question(question: str, bundle: Dict[str, Any]) -> Dict[str, Any
             "Structure the answer as: direct answer, supporting evidence, recommended next step. "
             "If the data does not support a conclusion, say so plainly."
         ),
-        prompt=(
-            f"Question: {question}\n\n"
-            f"Dataset context:\n{bundle_context_summary(bundle, detail='compact')}\n\n"
-            f"Deterministic grounded answer draft: {heuristic_answer}"
-        ),
-        max_output_tokens=320,
+        prompt=prompt,
+        max_output_tokens=max_output_tokens,
+        model=model,
+        reasoning_effort=reasoning_effort,
     )
     return {
         "heuristic_answer": heuristic_answer,

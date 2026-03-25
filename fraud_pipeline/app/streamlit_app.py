@@ -1133,6 +1133,13 @@ def page_questions(bundle: Dict[str, Any]) -> None:
     )
 
     st.caption(f"Active data source: {current_source_label(bundle)}")
+    st.caption(
+        "Best results come from investigation questions such as: "
+        "`What are the riskiest merchants?`, "
+        "`Why was TX000275 flagged?`, "
+        "`Which location has the most high-risk activity?`, "
+        "`What should OOF review first?`"
+    )
     question = st.text_input(
         "Ask about the current data",
         placeholder="Example: Which merchants appear most often in flagged transactions?",

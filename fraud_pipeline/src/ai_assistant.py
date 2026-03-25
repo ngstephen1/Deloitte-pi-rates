@@ -473,7 +473,57 @@ def explain_case(
     }
 
 
+def _is_help_intent(question: str) -> bool:
+    question_clean = " ".join(question.lower().strip().split())
+    help_phrases = {
+        "hi",
+        "hello",
+        "hey",
+        "help",
+        "what can you help me with",
+        "what can you do",
+        "how can you help",
+        "who are you",
+    }
+    if question_clean in help_phrases:
+        return True
+    return any(
+        phrase in question_clean
+        for phrase in [
+            "what can you help me with",
+            "what can you do",
+            "how can you help",
+            "how do i use this",
+            "what should i ask",
+        ]
+    )
+
+
+def _help_intent_answer(bundle: Dict[str, Any]) -> str:
+    summary = bundle.get("summary", {}) or {}
+    return (
+        "I can help you investigate the currently loaded fraud dataset. "
+        f"Right now the active view contains {summary.get('flagged_transactions', 0)} flagged transactions and "
+        f"{summary.get('high_risk_accounts', 0)} higher-risk accounts.\n\n"
+        "You can ask things like:\n"
+        "- What are the riskiest merchants?\n"
+        "- Which location has the most high-risk activity?\n"
+        "- Why was transaction TX000275 flagged?\n"
+        "- Are login attempts or device changes more associated with risk?\n"
+        "- Give me 3 recommendations for OOF based on this dataset."
+    )
+
+
 def answer_data_question(question: str, bundle: Dict[str, Any]) -> Dict[str, Any]:
+    if _is_help_intent(question):
+        help_answer = _help_intent_answer(bundle)
+        return {
+            "heuristic_answer": help_answer,
+            "ai_answer": None,
+            "ai_available": is_ai_enabled(),
+            "availability_message": ai_availability_message(),
+        }
+
     heuristic_answer = heuristic_question_answer(question, bundle)
     ai_text = request_ai_response(
         instructions=(
@@ -607,6 +657,9 @@ def heuristic_question_answer(question: str, bundle: Dict[str, Any]) -> str:
             f"{summary.get('high_risk_accounts', 0)} higher-risk accounts, and concentrated exposure in {top_channel}. "
             "The strongest recurring warning signs are the highest-risk entities and elevated access-pattern anomalies."
         )
+
+    if len(question_lower.strip()) <= 3:
+        return _help_intent_answer(bundle)
 
     return (
         f"The strongest investigation starting points are {summary.get('flagged_transactions', 0)} flagged transactions, "

@@ -48,10 +48,10 @@ def generate_openai_explanation(prompt: str) -> Optional[str]:
         return None
     
     try:
-        import openai
-        openai.api_key = api_key
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
         
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a fraud detection analyst. Provide concise, factual explanations."},
@@ -61,7 +61,7 @@ def generate_openai_explanation(prompt: str) -> Optional[str]:
             temperature=0.3,
         )
         
-        explanation = response["choices"][0]["message"]["content"].strip()
+        explanation = response.choices[0].message.content.strip()
         return explanation
     except Exception as e:
         LOGGER.warning(f"OpenAI API call failed: {e}; continuing without explanations")
@@ -332,7 +332,7 @@ def plot_channel_risk(risk_df: pd.DataFrame) -> Path:
     """Create chart of risk by channel."""
     LOGGER.info("Generating risk by channel visualization...")
     
-    channel_risk = risk_df.groupby("channel").agg({
+    channel_risk = risk_df.groupby("channel", observed=False).agg({
         "composite_risk_score": ["mean", "max", "count"],
     }).reset_index()
     channel_risk.columns = ["channel", "avg_risk_score", "max_risk_score", "count"]

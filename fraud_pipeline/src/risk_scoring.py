@@ -57,7 +57,19 @@ def combine_risk_signals(
     LOGGER.info("Combining risk signals...")
 
     # Start with transaction IDs and basic transaction info
-    risk_df = df[["transactionid", "accountid", "merchantid", "deviceid", "ip_address", "location", "transactionamount", "channel"]].copy()
+    base_columns = [
+        "transactionid",
+        "accountid",
+        "merchantid",
+        "deviceid",
+        "ip_address",
+        "location",
+        "transactionamount",
+        "channel",
+        "login_attempt_risk",
+    ]
+    available_base_columns = [column for column in base_columns if column in df.columns]
+    risk_df = df[available_base_columns].copy()
 
     # Flatten transactionid if it's 2D
     txn_id = risk_df["transactionid"].values
@@ -102,7 +114,11 @@ def combine_risk_signals(
 
     # Merge graph features if available
     if graph_features is not None:
-        risk_df = risk_df.merge(graph_features, on="transactionid", how="left")
+        risk_df = risk_df.merge(
+            graph_features.drop(columns=["accountid"], errors="ignore"),
+            on="transactionid",
+            how="left",
+        )
     else:
         LOGGER.info("Graph features not provided. Skipping graph feature merge.")
 

@@ -22,10 +22,17 @@ def load_raw_data(filepath: Path) -> pd.DataFrame:
     df = pd.read_csv(filepath)
     LOGGER.info(f"Loaded {len(df)} rows, {len(df.columns)} columns")
     
-    # Generate synthetic transactionid if missing or all NaN
-    if "transactionid" not in df.columns or df["transactionid"].isnull().all():
+    normalized_columns = pd.Index(df.columns).str.lower().str.replace(" ", "_")
+
+    # Generate synthetic transactionid only if no transaction id column exists after normalization
+    if "transactionid" not in normalized_columns:
         LOGGER.info("  Generating synthetic transactionid values...")
         df["transactionid"] = pd.Series([f"TXN_{i:08d}" for i in range(len(df))], index=df.index)
+    else:
+        source_column = df.columns[normalized_columns.get_loc("transactionid")]
+        if df[source_column].isnull().all():
+            LOGGER.info("  Generating synthetic transactionid values...")
+            df[source_column] = pd.Series([f"TXN_{i:08d}" for i in range(len(df))], index=df.index)
     
     return df
 
@@ -35,6 +42,12 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     Standardize column names: lowercase, replace spaces with underscores.
     """
     df.columns = df.columns.str.lower().str.replace(" ", "_")
+    if df.columns.duplicated().any():
+        LOGGER.warning(
+            "Duplicate column names found after normalization; keeping first occurrence for "
+            f"{df.columns[df.columns.duplicated()].tolist()}"
+        )
+        df = df.loc[:, ~df.columns.duplicated(keep="first")]
     return df
 
 
@@ -159,13 +172,13 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     ).astype(int)
 
     # 6. Account transaction count (total transactions per account)
-    df["account_transaction_count"] = df.groupby("accountid").size().reindex(df.index, fill_value=0).values
+    df["account_transaction_count"] = df.groupby("accountid")["transactionid"].transform("size")
 
     # 7. Merchant transaction count (total transactions per merchant)
-    df["merchant_transaction_count"] = df.groupby("merchantid").size().reindex(df.index, fill_value=0).values
+    df["merchant_transaction_count"] = df.groupby("merchantid")["transactionid"].transform("size")
 
     # 8. Location transaction count (total transactions per location)
-    df["location_transaction_count"] = df.groupby("location").size().reindex(df.index, fill_value=0).values
+    df["location_transaction_count"] = df.groupby("location")["transactionid"].transform("size")
 
     LOGGER.info(f"  Engineered 8 features")
     return df
@@ -192,15 +205,15 @@ def validate_data_types(df: pd.DataFrame) -> pd.DataFrame:
     LOGGER.info("Validating and converting data types...")
 
     dtype_map = {
-        "transactionid": "object",
-        "accountid": "object",
+        "transactionid": "string",
+        "accountid": "string",
         "transactionamount": "float64",
         "transactiondate": "datetime64[ns]",
         "transactiontype": "category",
-        "location": "object",
-        "deviceid": "object",
-        "ip_address": "object",
-        "merchantid": "object",
+        "location": "string",
+        "deviceid": "string",
+        "ip_address": "string",
+        "merchantid": "string",
         "channel": "category",
         "customerage": "int64",
         "customeroccupation": "category",
@@ -216,9 +229,8 @@ def validate_data_types(df: pd.DataFrame) -> pd.DataFrame:
                 if dtype.startswith("datetime"):
                     # Already parsed
                     pass
-                elif col == "transactionid":
-                    # Keep transactionid as simple string column
-                    df[col] = df[col].astype(str)
+                elif dtype == "string":
+                    df[col] = df[col].astype("string")
                 elif dtype == "category":
                     df[col] = df[col].astype(dtype)
                 else:

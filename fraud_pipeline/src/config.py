@@ -56,9 +56,9 @@ KMEANS_CONTAMINATION = 0.05  # Treat smallest clusters as anomalies
 
 # Numeric features for anomaly detection
 ANOMALY_FEATURES = [
-    "transaction_amount",
-    "transaction_duration",
-    "login_attempts",
+    "transactionamount",
+    "transactionduration",
+    "loginattempts",
     "account_transaction_count",
     "merchant_transaction_count",
     "location_transaction_count",

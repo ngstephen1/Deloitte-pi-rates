@@ -26,6 +26,7 @@ This pipeline processes Kaggle's Bank Transaction Dataset (2,512 transactions) t
 - **CSV upload workflow**: Users can choose a CSV type, validate it, preview it, and analyze raw uploads directly in Streamlit
 - **Optional AI features**: Live recommendations, Q&A, and case explanations powered by `OPENAI_API_KEY`
 - **OpenClaw-style ChatOps**: Discord webhook delivery, fraud alerting, proactive reminders, and grounded analyst Q&A against the latest fraud context
+- **Discord image analysis**: OpenClaw can review uploaded screenshots, statements, invoices, suspicious emails, verification screens, and fraud dashboards with grounded image-to-risk analysis
 - **Persistent review log**: Analyst decisions are stored in a lightweight CSV log with timestamps and versioned updates
 - **Lightweight**: Runs in ~40 seconds on standard laptop; <500MB memory
 
@@ -132,6 +133,7 @@ The Streamlit dashboard remains the main fraud workspace. The ChatOps layer comp
 - sending report digests and threshold-based alerts to Discord via webhook
 - supporting grounded analyst Q&A from the latest published fraud context
 - sending proactive monitoring reminders while the Discord companion bot is running
+- reviewing uploaded fraud-relevant images and exporting markdown + JSON image-analysis artifacts
 
 Common environment variables:
 
@@ -170,7 +172,49 @@ python3 scripts/test_openclaw_chatops.py --use-pipeline-outputs --question "Show
 
 # Run the Discord companion bot for live analyst back-and-forth and proactive reminders
 python3 scripts/openclaw_discord_bot.py
+
+# Run local image-analysis smoke tests against the bundled sample images
+python3 scripts/test_image_chatops.py --all-samples --use-pipeline-outputs
 ```
+
+### 7. Discord Image Analysis
+
+The Discord companion bot can analyze fraud-relevant images directly from chat. Supported image classes:
+
+- bank transaction screenshot
+- credit/debit card statement page
+- invoice or payment receipt
+- suspicious email screenshot about payment, login, or account alerts
+- identity or device verification screen with anomalies
+- dashboard screenshot with risky transactions
+
+Supported file types:
+
+- `PNG`
+- `JPG`
+- `JPEG`
+- `WEBP`
+
+Typical Discord prompts:
+
+- `analyze this`
+- `is this suspicious?`
+- `extract fraud indicators from this`
+- `compare this to current flagged patterns`
+- `what should OOF do next based on this image?`
+- `/analyze-image`
+- `/fraud-image-review`
+
+The bot response includes:
+
+- detected image type
+- extracted evidence
+- suspicious indicators
+- caution notes
+- recommended next actions
+- exported `.md` and `.json` artifacts under `outputs/chatops/exports/image_reviews/`
+
+If you upload an image with no goal text, the bot will ask what you want it to do before running the analysis.
 
 ## Project Structure
 
@@ -222,7 +266,9 @@ fraud_pipeline/
 ├── scripts/
 │   ├── send_fraud_alerts.py      # Manual report/alert trigger for ChatOps
 │   ├── test_openclaw_chatops.py  # Grounded local analyst-question smoke test
+│   ├── test_image_chatops.py     # Local image-analysis smoke test for Discord/OpenClaw
 │   └── openclaw_discord_bot.py   # Discord companion bot for live analyst chat and reminders
+├── discord-img/                  # Bundled demo screenshots for image-analysis testing
 ├── run_pipeline.py               # Orchestrator
 ├── validate.py                   # Pre-flight checks
 ├── requirements.txt

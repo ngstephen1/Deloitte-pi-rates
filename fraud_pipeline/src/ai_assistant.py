@@ -44,12 +44,13 @@ def _build_response_payload(
     *,
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    input_override: Optional[Any] = None,
 ) -> Dict[str, Any]:
     selected_model = model or config.OPENAI_MODEL
     payload: Dict[str, Any] = {
         "model": selected_model,
         "instructions": instructions,
-        "input": prompt,
+        "input": input_override if input_override is not None else prompt,
         "max_output_tokens": max_output_tokens,
         "store": False,
         "text": {"verbosity": "low"},
@@ -128,6 +129,7 @@ def _request_ai_response_http(
     *,
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    input_override: Optional[Any] = None,
 ) -> Optional[str]:
     payload = _build_response_payload(
         instructions,
@@ -135,26 +137,25 @@ def _request_ai_response_http(
         max_output_tokens,
         model=model,
         reasoning_effort=reasoning_effort,
+        input_override=input_override,
     )
     response_payload = _perform_http_request(payload)
     if not response_payload:
         return None
 
     output_text = _extract_output_text(response_payload)
-    if output_text:
-        return output_text
-
     incomplete_reason = (
         response_payload.get("incomplete_details", {}) or {}
     ).get("reason")
     if response_payload.get("status") == "incomplete" and incomplete_reason == "max_output_tokens":
-        retry_tokens = min(max(max_output_tokens * 2, 300), 1200)
+        retry_tokens = min(max(max_output_tokens * 2, 300), 2400)
         retry_payload = _build_response_payload(
             instructions,
             prompt,
             retry_tokens,
             model=model,
             reasoning_effort=reasoning_effort,
+            input_override=input_override,
         )
         retry_response_payload = _perform_http_request(retry_payload)
         if retry_response_payload:
@@ -165,7 +166,10 @@ def _request_ai_response_http(
                 "AI HTTP request remained incomplete after retry: "
                 f"reason={(retry_response_payload.get('incomplete_details', {}) or {}).get('reason')}"
             )
-        return None
+        return output_text
+
+    if output_text:
+        return output_text
 
     if response_payload.get("status") == "completed":
         LOGGER.debug("AI HTTP request completed without extractable text output.")
@@ -179,6 +183,7 @@ def _request_ai_response_sdk(
     *,
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    input_override: Optional[Any] = None,
 ) -> Optional[str]:
     try:
         from openai import OpenAI
@@ -189,7 +194,7 @@ def _request_ai_response_sdk(
         request_kwargs: Dict[str, Any] = {
             "model": selected_model,
             "instructions": instructions,
-            "input": prompt,
+            "input": input_override if input_override is not None else prompt,
             "max_output_tokens": max_output_tokens,
             "store": False,
         }
@@ -242,6 +247,50 @@ def request_ai_response(
                 max_output_tokens,
                 model=model,
                 reasoning_effort=reasoning_effort,
+            )
+        if text:
+            return text
+    return None
+
+
+def request_ai_content_response(
+    instructions: str,
+    input_content: Any,
+    *,
+    max_output_tokens: int = config.AI_MAX_OUTPUT_TOKENS,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+) -> Optional[str]:
+    """Call the OpenAI Responses API with structured multimodal input."""
+    if not is_ai_enabled():
+        return None
+
+    transport_preference = str(config.OPENAI_TRANSPORT_PREFERENCE).lower()
+    if transport_preference == "sdk":
+        transports = ["sdk", "http"]
+    elif transport_preference in {"auto", "both"}:
+        transports = ["http", "sdk"]
+    else:
+        transports = ["http"]
+
+    for transport in transports:
+        if transport == "http":
+            text = _request_ai_response_http(
+                instructions,
+                "",
+                max_output_tokens,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                input_override=input_content,
+            )
+        else:
+            text = _request_ai_response_sdk(
+                instructions,
+                "",
+                max_output_tokens,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                input_override=input_content,
             )
         if text:
             return text
@@ -470,6 +519,313 @@ def _find_matching_value(question: str, df: pd.DataFrame, column: str) -> Option
         if value.lower() in question_lower:
             return value
     return None
+
+
+def summarize_case_evidence(
+    entity_type: str,
+    case_summary: Dict[str, Any],
+    bundle: Dict[str, Any],
+) -> Dict[str, Any]:
+    transactions = bundle.get("transactions", pd.DataFrame())
+    accounts = bundle.get("accounts", pd.DataFrame())
+    merchants = bundle.get("merchants", pd.DataFrame())
+    locations = bundle.get("locations", pd.DataFrame())
+    devices = bundle.get("devices", pd.DataFrame())
+
+    if entity_type == "transaction":
+        transaction_id = str(case_summary.get("transactionid", ""))
+        if not transactions.empty and "transactionid" in transactions.columns and transaction_id:
+            matches = transactions.loc[transactions["transactionid"].astype(str) == transaction_id]
+            if not matches.empty:
+                row = matches.iloc[0]
+                evidence_lines = [
+                    f"Transaction ID: {row.get('transactionid', 'N/A')}",
+                    f"Account: {row.get('accountid', 'N/A')}",
+                    f"Merchant: {row.get('merchantid', 'N/A')}",
+                    f"Location: {row.get('location', 'N/A')}",
+                    f"Channel: {row.get('channel', 'N/A')}",
+                    f"Amount: ${float(row.get('transactionamount', 0) or 0):,.2f}",
+                    f"Composite risk: {float(row.get('composite_risk_score', 0) or 0):.3f}",
+                    f"Risk level: {row.get('risk_level', 'N/A')}",
+                    f"Strongest model drivers: {_strongest_risk_components(row)}",
+                ]
+                for label, column in [
+                    ("Login attempt risk", "login_attempt_risk"),
+                    ("Device change flag", "device_change_flag"),
+                    ("IP change flag", "ip_change_flag"),
+                    ("Graph risk", "graph_risk_score"),
+                ]:
+                    if column in row.index:
+                        evidence_lines.append(f"{label}: {float(row.get(column, 0) or 0):.3f}")
+                next_steps = [
+                    "Verify whether the account, merchant, and access pattern match expected customer behavior.",
+                    "Check linked device/IP reuse and nearby high-risk transactions before closing the case.",
+                    "Record an analyst disposition once the exposure path is confirmed.",
+                ]
+                return {
+                    "case_type": entity_type,
+                    "case_id": transaction_id,
+                    "summary": (
+                        f"Transaction {transaction_id} is elevated at {float(row.get('composite_risk_score', 0) or 0):.3f} "
+                        f"with {row.get('risk_level', 'N/A')} risk and strong contributions from {_strongest_risk_components(row)}."
+                    ),
+                    "evidence_lines": evidence_lines,
+                    "next_steps": next_steps,
+                    "case_row": row.to_dict(),
+                }
+
+    if entity_type == "account":
+        account_id = str(case_summary.get("accountid", ""))
+        account_row = pd.Series(case_summary)
+        if not accounts.empty and "accountid" in accounts.columns and account_id:
+            matches = accounts.loc[accounts["accountid"].astype(str) == account_id]
+            if not matches.empty:
+                account_row = matches.iloc[0]
+        linked_transactions = pd.DataFrame()
+        if not transactions.empty and "accountid" in transactions.columns and account_id:
+            linked_transactions = transactions.loc[transactions["accountid"].astype(str) == account_id].copy()
+            if "composite_risk_score" in linked_transactions.columns:
+                linked_transactions = linked_transactions.sort_values("composite_risk_score", ascending=False)
+        top_tx = linked_transactions.head(3)["transactionid"].astype(str).tolist() if not linked_transactions.empty and "transactionid" in linked_transactions.columns else []
+        evidence_lines = [
+            f"Account ID: {account_id or 'N/A'}",
+            f"Account risk: {float(account_row.get('account_risk_score', 0) or 0):.3f}",
+            f"Transactions: {int(account_row.get('transaction_count', 0) or 0)}",
+            f"High-risk transactions: {int(account_row.get('high_risk_transaction_count', 0) or 0)}",
+            f"High-risk share: {float(account_row.get('high_risk_transaction_pct', 0) or 0):.1f}%",
+        ]
+        if top_tx:
+            evidence_lines.append(f"Top linked transactions: {', '.join(top_tx)}")
+        return {
+            "case_type": entity_type,
+            "case_id": account_id,
+            "summary": (
+                f"Account {account_id} is a top risk hotspot with account-level risk "
+                f"{float(account_row.get('account_risk_score', 0) or 0):.3f}."
+            ),
+            "evidence_lines": evidence_lines,
+            "next_steps": [
+                "Review the highest-risk linked transactions before examining lower-risk activity.",
+                "Confirm whether merchant, location, and device patterns are consistent with historic account behavior.",
+                "Escalate if repeated abnormal access patterns are concentrated around the same account.",
+            ],
+            "case_row": account_row.to_dict(),
+        }
+
+    if entity_type == "merchant":
+        merchant_id = str(case_summary.get("merchantid", ""))
+        merchant_row = pd.Series(case_summary)
+        if not merchants.empty and "merchantid" in merchants.columns and merchant_id:
+            matches = merchants.loc[merchants["merchantid"].astype(str) == merchant_id]
+            if not matches.empty:
+                merchant_row = matches.iloc[0]
+        linked_transactions = pd.DataFrame()
+        if not transactions.empty and "merchantid" in transactions.columns and merchant_id:
+            linked_transactions = transactions.loc[transactions["merchantid"].astype(str) == merchant_id].copy()
+            if "composite_risk_score" in linked_transactions.columns:
+                linked_transactions = linked_transactions.sort_values("composite_risk_score", ascending=False)
+        top_accounts = linked_transactions.head(3)["accountid"].astype(str).tolist() if not linked_transactions.empty and "accountid" in linked_transactions.columns else []
+        evidence_lines = [
+            f"Merchant ID: {merchant_id or 'N/A'}",
+            f"Average risk: {float(merchant_row.get('avg_risk_score', 0) or 0):.3f}",
+            f"Max risk: {float(merchant_row.get('max_risk_score', 0) or 0):.3f}",
+            f"Transactions: {int(merchant_row.get('transaction_count', 0) or 0)}",
+            f"High-risk count: {int(merchant_row.get('high_risk_count', 0) or 0)}",
+        ]
+        if top_accounts:
+            evidence_lines.append(f"Top exposed accounts: {', '.join(top_accounts)}")
+        return {
+            "case_type": entity_type,
+            "case_id": merchant_id,
+            "summary": (
+                f"Merchant {merchant_id} shows concentrated suspicious activity with max risk "
+                f"{float(merchant_row.get('max_risk_score', 0) or 0):.3f}."
+            ),
+            "evidence_lines": evidence_lines,
+            "next_steps": [
+                "Review the highest-risk linked transactions and confirm whether the pattern is concentrated in one channel or account cluster.",
+                "Check whether merchant controls should be tightened before the next review cycle.",
+            ],
+            "case_row": merchant_row.to_dict(),
+        }
+
+    if entity_type == "location":
+        location_id = str(case_summary.get("location", ""))
+        location_row = pd.Series(case_summary)
+        if not locations.empty and "location" in locations.columns and location_id:
+            matches = locations.loc[locations["location"].astype(str) == location_id]
+            if not matches.empty:
+                location_row = matches.iloc[0]
+        evidence_lines = [
+            f"Location: {location_id or 'N/A'}",
+            f"Average risk: {float(location_row.get('avg_risk_score', 0) or 0):.3f}",
+            f"Max risk: {float(location_row.get('max_risk_score', 0) or 0):.3f}",
+            f"Transactions: {int(location_row.get('transaction_count', 0) or 0)}",
+            f"High-risk count: {int(location_row.get('high_risk_count', 0) or 0)}",
+        ]
+        return {
+            "case_type": entity_type,
+            "case_id": location_id,
+            "summary": f"Location {location_id} is a concentration point for suspicious activity in the current portfolio.",
+            "evidence_lines": evidence_lines,
+            "next_steps": [
+                "Validate whether the spike aligns with normal business volume or represents concentrated abnormal activity.",
+                "Review the connected merchants, accounts, and channels before closing the location as benign.",
+            ],
+            "case_row": location_row.to_dict(),
+        }
+
+    if entity_type == "device":
+        device_id = str(case_summary.get("deviceid", ""))
+        device_row = pd.Series(case_summary)
+        if not devices.empty and "deviceid" in devices.columns and device_id:
+            matches = devices.loc[devices["deviceid"].astype(str) == device_id]
+            if not matches.empty:
+                device_row = matches.iloc[0]
+        return {
+            "case_type": entity_type,
+            "case_id": device_id,
+            "summary": f"Device {device_id} is materially exposed to higher-risk fraud activity in the active dataset.",
+            "evidence_lines": [
+                f"Device ID: {device_id or 'N/A'}",
+                f"Average risk: {float(device_row.get('avg_risk_score', 0) or 0):.3f}",
+                f"Max risk: {float(device_row.get('max_risk_score', 0) or 0):.3f}",
+                f"Transactions: {int(device_row.get('transaction_count', 0) or 0)}",
+                f"High-risk count: {int(device_row.get('high_risk_count', 0) or 0)}",
+            ],
+            "next_steps": [
+                "Inspect device reuse across linked accounts and confirm whether access changes cluster around the same merchant or location.",
+            ],
+            "case_row": device_row.to_dict(),
+        }
+
+    return {
+        "case_type": entity_type,
+        "case_id": str(case_summary.get("transactionid") or case_summary.get("accountid") or case_summary.get("merchantid") or case_summary.get("location") or "N/A"),
+        "summary": _baseline_case_explanation(entity_type, case_summary),
+        "evidence_lines": [],
+        "next_steps": ["Review the linked entities and strongest risk signals before taking action."],
+        "case_row": case_summary,
+    }
+
+
+def build_deep_case_explanation(
+    entity_type: str,
+    case_summary: Dict[str, Any],
+    bundle: Dict[str, Any],
+    *,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+) -> Dict[str, Any]:
+    evidence = summarize_case_evidence(entity_type, case_summary, bundle)
+    prompt = (
+        f"Entity type: {entity_type}\n"
+        f"Case summary: {case_summary}\n"
+        f"Deterministic evidence: {evidence}\n\n"
+        f"Dataset context:\n{bundle_context_summary(bundle, detail='minimal')}\n\n"
+        "Explain exactly why this case was flagged. Use row-level evidence, strongest model contributors, and analyst next steps."
+    )
+    ai_text = request_ai_response(
+        instructions=(
+            "You are a senior fraud investigator. Use only the provided evidence. "
+            "Return three sections: Why flagged, Evidence, Analyst next step. "
+            "Mention model contributors and row-level evidence directly."
+        ),
+        prompt=prompt,
+        max_output_tokens=300,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    return {
+        "summary": evidence["summary"],
+        "evidence_lines": evidence["evidence_lines"],
+        "next_steps": evidence["next_steps"],
+        "ai_text": ai_text,
+        "ai_available": is_ai_enabled(),
+        "case_id": evidence["case_id"],
+        "case_type": evidence["case_type"],
+    }
+
+
+def _risk_summary_agent(bundle: Dict[str, Any]) -> str:
+    summary = bundle.get("summary", {}) or {}
+    transactions = bundle.get("transactions", pd.DataFrame())
+    top_tx = transactions.iloc[0]["transactionid"] if not transactions.empty and "transactionid" in transactions.columns else "N/A"
+    return (
+        f"Portfolio risk summary: {summary.get('flagged_transactions', 0)} flagged transactions, "
+        f"{summary.get('high_risk_count', 0)} high-risk transactions, and top immediate transaction {top_tx}."
+    )
+
+
+def _entity_investigator_agent(bundle: Dict[str, Any]) -> str:
+    accounts = bundle.get("accounts", pd.DataFrame())
+    merchants = bundle.get("merchants", pd.DataFrame())
+    locations = bundle.get("locations", pd.DataFrame())
+    top_account = accounts.iloc[0]["accountid"] if not accounts.empty and "accountid" in accounts.columns else "N/A"
+    top_merchant = merchants.iloc[0]["merchantid"] if not merchants.empty and "merchantid" in merchants.columns else "N/A"
+    top_location = locations.iloc[0]["location"] if not locations.empty and "location" in locations.columns else "N/A"
+    return (
+        f"Entity investigator: highest-risk account {top_account}, highest-risk merchant {top_merchant}, "
+        f"and top location concentration {top_location} should anchor the next review pass."
+    )
+
+
+def _controls_action_agent(bundle: Dict[str, Any]) -> str:
+    recommendations = rule_based_recommendations(bundle)
+    return "Controls strategist: " + (" | ".join(recommendations[:3]) if recommendations else "No deterministic control recommendations are available.")
+
+
+def generate_multi_agent_oof_brief(
+    bundle: Dict[str, Any],
+    *,
+    focus: str = "",
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+) -> Dict[str, Any]:
+    role_outputs = {
+        "risk_summary_agent": _risk_summary_agent(bundle),
+        "entity_investigator_agent": _entity_investigator_agent(bundle),
+        "controls_action_agent": _controls_action_agent(bundle),
+    }
+    prompt = (
+        f"Requested focus: {focus or 'Executive fraud risk briefing'}\n\n"
+        f"Dataset context:\n{bundle_context_summary(bundle, detail='compact')}\n\n"
+        f"Role outputs:\n{json.dumps(role_outputs, indent=2)}\n\n"
+        "Merge these into a concise Office of Oversight and Finance brief with sections: top risks, unresolved items, control gaps, recommended actions."
+    )
+    lead_synthesis = request_ai_response(
+        instructions=(
+            "You are the lead OOF fraud briefing agent. Merge the specialist outputs into a concise executive markdown brief. "
+            "Use only supplied evidence and call out any evidence gaps plainly."
+        ),
+        prompt=prompt,
+        max_output_tokens=420,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+
+    if not lead_synthesis:
+        summary = bundle.get("summary", {}) or {}
+        lead_synthesis = (
+            "# OOF Executive Brief\n\n"
+            "## Top Risks\n"
+            f"- {role_outputs['risk_summary_agent']}\n"
+            f"- {role_outputs['entity_investigator_agent']}\n\n"
+            "## Unresolved Items\n"
+            f"- Pending review: {summary.get('pending_review_total', 0):,}\n"
+            f"- Pending high risk: {summary.get('pending_high_risk_count', 0):,}\n\n"
+            "## Control Gaps\n"
+            f"- {role_outputs['controls_action_agent']}\n\n"
+            "## Recommended Actions\n"
+            "- Review the top flagged cases first and update the analyst log immediately after disposition.\n"
+            "- Validate whether account, merchant, and access-pattern anomalies cluster around the same entities.\n"
+        )
+
+    return {
+        "role_outputs": role_outputs,
+        "brief_markdown": lead_synthesis,
+        "used_ai": bool(lead_synthesis and is_ai_enabled()),
+    }
 
 
 def generate_ai_recommendations(bundle: Dict[str, Any]) -> Dict[str, Any]:

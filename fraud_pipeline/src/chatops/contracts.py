@@ -11,9 +11,10 @@ from typing import Any, Dict, Optional
 from .. import config
 
 try:
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values, load_dotenv
 except Exception:  # pragma: no cover - optional during bootstrap
     load_dotenv = None
+    dotenv_values = None
 
 WEBHOOK_FORMATS = {"openclaw", "discord"}
 
@@ -39,14 +40,36 @@ def _refresh_runtime_env() -> None:
     load_dotenv(config.PROJECT_ROOT / ".env", override=False)
 
 
+def _dotenv_text(name: str) -> Optional[str]:
+    if dotenv_values is None:
+        return None
+
+    for path in [config.PROJECT_ROOT.parent / ".env", config.PROJECT_ROOT / ".env"]:
+        if not path.exists():
+            continue
+        values = dotenv_values(path)
+        value = values.get(name)
+        if value is None:
+            continue
+        cleaned = str(value).strip().strip('"').strip("'")
+        if cleaned:
+            return cleaned
+    return None
+
+
 def _runtime_env_text(name: str, fallback: Optional[str] = None) -> Optional[str]:
     value = os.environ.get(name)
-    if value is None:
-        value = fallback
-    if value is None:
+    if value is not None:
+        cleaned = str(value).strip().strip('"').strip("'")
+        if cleaned:
+            return cleaned
+    file_value = _dotenv_text(name)
+    if file_value:
+        return file_value
+    if fallback is None:
         return None
-    cleaned = str(value).strip().strip('"').strip("'")
-    return cleaned or None
+    cleaned_fallback = str(fallback).strip().strip('"').strip("'")
+    return cleaned_fallback or None
 
 
 @dataclass
@@ -55,6 +78,7 @@ class NotificationTarget:
     webhook_format: Optional[str] = None
     channel_id: Optional[str] = None
     conversation_id: Optional[str] = None
+    thread_id: Optional[str] = None
     actor_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -65,6 +89,7 @@ class DeliveryResult:
     webhook_format: Optional[str] = None
     delivery_error: Optional[str] = None
     payload_preview: Optional[Dict[str, Any]] = None
+    response_data: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -116,6 +141,7 @@ def get_default_notification_target() -> Optional[NotificationTarget]:
         webhook_format=webhook_format,
         channel_id=channel_id,
         conversation_id=conversation_id,
+        thread_id=None,
         actor_id=actor_id,
     )
 
@@ -129,6 +155,7 @@ def merge_notification_targets(*targets: Optional[NotificationTarget]) -> Option
         merged.webhook_format = target.webhook_format or merged.webhook_format
         merged.channel_id = target.channel_id or merged.channel_id
         merged.conversation_id = target.conversation_id or merged.conversation_id
+        merged.thread_id = target.thread_id or merged.thread_id
         merged.actor_id = target.actor_id or merged.actor_id
         merged.metadata.update(target.metadata or {})
 

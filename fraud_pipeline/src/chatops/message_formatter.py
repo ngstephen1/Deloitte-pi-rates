@@ -93,6 +93,11 @@ def _build_case_candidates(bundle: Dict[str, Any]) -> list[Dict[str, Any]]:
     return candidates
 
 
+def build_case_thread_title(case_type: str, case_id: str) -> str:
+    label = {"transaction": "Transaction", "account": "Account", "merchant": "Merchant"}.get(case_type, "Case")
+    return f"{label} {case_id}"
+
+
 def build_report_message(
     bundle: Dict[str, Any],
     *,
@@ -199,7 +204,7 @@ def build_reminder_message(bundle: Dict[str, Any]) -> ChatOpsMessage:
     )
 
 
-def build_case_reminder_message(bundle: Dict[str, Any], *, reminder_index: int = 0) -> ChatOpsMessage:
+def build_case_reminder_message(bundle: Dict[str, Any], *, reminder_index: int = 0, escalated: bool = False) -> ChatOpsMessage:
     candidates = _build_case_candidates(bundle)
     if not candidates:
         return build_reminder_message(bundle)
@@ -216,8 +221,9 @@ def build_case_reminder_message(bundle: Dict[str, Any], *, reminder_index: int =
             title=f"Case Reminder • {transaction_id}",
             text=(
                 f"Follow up on transaction {transaction_id}. It remains one of the highest-priority items in the active fraud queue."
+                + (" This case is now escalated because it has remained unresolved beyond the configured reminder window." if escalated else "")
             ),
-            severity="critical" if str(case.get("risk_level", "")).lower() == "high" else "warning",
+            severity="critical" if escalated or str(case.get("risk_level", "")).lower() == "high" else "warning",
             facts=[
                 f"Account {case.get('accountid', 'N/A')}",
                 f"Merchant {case.get('merchantid', 'N/A')}",
@@ -240,8 +246,11 @@ def build_case_reminder_message(bundle: Dict[str, Any], *, reminder_index: int =
         return ChatOpsMessage(
             message_type="fraud.reminder.case_account",
             title=f"Account Reminder • {account_id}",
-            text=f"Account {account_id} is still a top fraud-monitoring priority in the active portfolio.",
-            severity="warning",
+            text=(
+                f"Account {account_id} is still a top fraud-monitoring priority in the active portfolio."
+                + (" The reminder has escalated because the case has remained untouched for too long." if escalated else "")
+            ),
+            severity="critical" if escalated else "warning",
             facts=[
                 f"Account risk {float(case.get('account_risk_score', 0) or 0):.3f}",
                 f"Transactions {int(case.get('transaction_count', 0) or 0)}",
@@ -261,8 +270,11 @@ def build_case_reminder_message(bundle: Dict[str, Any], *, reminder_index: int =
     return ChatOpsMessage(
         message_type="fraud.reminder.case_merchant",
         title=f"Merchant Reminder • {merchant_id}",
-        text=f"Merchant {merchant_id} continues to show elevated suspicious activity in the current fraud view.",
-        severity="warning",
+        text=(
+            f"Merchant {merchant_id} continues to show elevated suspicious activity in the current fraud view."
+            + (" The reminder is escalated because follow-up has stalled." if escalated else "")
+        ),
+        severity="critical" if escalated else "warning",
         facts=[
             f"Average risk {float(case.get('avg_risk_score', 0) or 0):.3f}",
             f"Max risk {float(case.get('max_risk_score', 0) or 0):.3f}",
@@ -302,7 +314,7 @@ def build_decision_update_message(
         highlights=[notes] if notes.strip() else [],
         next_action="Use the updated review status when triaging the remaining queue and when answering Discord analyst questions.",
         source_label=source_label,
-        metadata={"decision": decision, "case_id": transaction_id},
+        metadata={"decision": decision, "case_type": "transaction", "case_id": transaction_id},
     )
 
 
@@ -318,6 +330,22 @@ def build_qna_message(question: str, answer: str, *, source_label: str, used_ai:
             f"AI used: {'yes' if used_ai else 'fallback'}",
         ],
         source_label=source_label,
+    )
+
+
+def build_oof_brief_message(brief_markdown: str, *, source_label: str, focus: str = "") -> ChatOpsMessage:
+    lines = [line.strip() for line in brief_markdown.splitlines() if line.strip()]
+    preview = "\n".join(lines[:8])
+    highlights = [line.lstrip("- ").strip() for line in lines if line.startswith("-")][:4]
+    return ChatOpsMessage(
+        message_type="fraud.oof_brief",
+        title="OOF Executive Brief",
+        text=_truncate(preview, 1600),
+        severity="warning",
+        highlights=highlights,
+        next_action="Use the attached brief to align OOF on the next fraud triage and control decisions.",
+        source_label=source_label,
+        metadata={"focus": focus},
     )
 
 

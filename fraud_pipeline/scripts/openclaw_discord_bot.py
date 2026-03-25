@@ -5,6 +5,7 @@ Discord companion bot for grounded fraud ChatOps questions and reminders.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -32,9 +33,21 @@ except Exception as exc:  # pragma: no cover - import guard for optional depende
 from src import config
 from src.chatops import load_active_bundle
 from src.chatops.alert_service import generate_fraud_alerts
+from src.chatops.discord_state import (
+    build_case_key,
+    get_case_thread,
+    get_channel_state,
+    mark_case_thread_human_touch,
+    read_discord_state,
+    update_channel_workspace,
+    upsert_case_thread,
+    write_discord_state,
+)
 from src.chatops.discord_upload_service import inspect_discord_csv_upload, process_saved_csv_upload, save_uploaded_csv
-from src.chatops.message_formatter import build_case_reminder_message, build_report_message
-from src.chatops.query_service import answer_analyst_question
+from src.chatops.image_analysis import analyze_uploaded_image
+from src.chatops.image_extractors import is_supported_image_attachment, save_uploaded_image
+from src.chatops.message_formatter import build_case_reminder_message, build_case_thread_title, build_oof_brief_message, build_report_message
+from src.chatops.query_service import answer_analyst_question, create_oof_brief, run_command_workflow
 
 
 def _parse_id_set(raw_value: str) -> set[str]:
@@ -42,34 +55,15 @@ def _parse_id_set(raw_value: str) -> set[str]:
 
 
 def _read_state() -> Dict[str, Any]:
-    if not config.CHATOPS_DISCORD_STATE_FILE.exists():
-        return {"channels": {}}
-    try:
-        return json.loads(config.CHATOPS_DISCORD_STATE_FILE.read_text())
-    except Exception:
-        return {"channels": {}}
+    return read_discord_state()
 
 
 def _write_state(state: Dict[str, Any]) -> None:
-    config.CHATOPS_DISCORD_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    config.CHATOPS_DISCORD_STATE_FILE.write_text(json.dumps(state, indent=2))
+    write_discord_state(state)
 
 
 def _get_channel_state(state: Dict[str, Any], channel_id: str) -> Dict[str, Any]:
-    channels = state.setdefault("channels", {})
-    channel_state = channels.setdefault(
-        channel_id,
-        {
-            "last_human_at": "",
-            "last_proactive_at": "",
-            "last_daily_reset": "",
-            "proactive_count_today": 0,
-            "reminder_cursor": 0,
-            "pending_upload": None,
-        },
-    )
-    channel_state.setdefault("pending_upload", None)
-    return channel_state
+    return get_channel_state(state, channel_id)
 
 
 def _reset_daily_counter_if_needed(channel_state: Dict[str, str], now: datetime) -> None:
@@ -96,6 +90,10 @@ def _split_for_discord(text: str, max_chars: int = 1800) -> List[str]:
     return chunks
 
 
+async def _run_blocking(func, /, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
 def _summarize_columns(columns: list[str], max_items: int = 8) -> str:
     if not columns:
         return "(none)"
@@ -114,8 +112,13 @@ def _message_allowed(message: discord.Message) -> bool:
     allowed_channels = _parse_id_set(os.environ.get("DISCORD_ALLOWED_CHANNEL_IDS", ""))
     allowed_guilds = _parse_id_set(os.environ.get("DISCORD_ALLOWED_GUILD_IDS", ""))
 
-    if allowed_channels and str(message.channel.id) not in allowed_channels:
-        return False
+    if allowed_channels:
+        channel_ids_to_check = {str(message.channel.id)}
+        parent_id = getattr(message.channel, "parent_id", None)
+        if parent_id is not None:
+            channel_ids_to_check.add(str(parent_id))
+        if not channel_ids_to_check.intersection(allowed_channels):
+            return False
     if allowed_guilds and message.guild and str(message.guild.id) not in allowed_guilds:
         return False
     return True
@@ -132,6 +135,21 @@ def _find_csv_attachment(message: discord.Message) -> discord.Attachment | None:
         if name.endswith(".csv") or content_type in {"text/csv", "application/csv", "application/vnd.ms-excel"}:
             return attachment
     return None
+
+
+def _find_image_attachment(message: discord.Message) -> discord.Attachment | None:
+    for attachment in message.attachments:
+        if is_supported_image_attachment(attachment.filename or "", attachment.content_type or ""):
+            return attachment
+    return None
+
+
+def _normalize_image_goal(text: str) -> str:
+    normalized = text.strip()
+    for prefix in ["/analyze-image", "/fraud-image-review"]:
+        if normalized.lower().startswith(prefix):
+            return normalized[len(prefix):].strip()
+    return normalized
 
 
 def _looks_like_upload_instruction(text: str) -> bool:
@@ -198,6 +216,11 @@ def _format_reminder_text(reminder_index: int) -> str:
     return _render_chatops_message(message)
 
 
+def _build_proactive_case_message(reminder_index: int, *, escalated: bool = False):
+    bundle = load_active_bundle()
+    return build_case_reminder_message(bundle, reminder_index=reminder_index, escalated=escalated)
+
+
 async def _build_transcript(channel: discord.abc.Messageable, limit: int) -> str:
     if isinstance(channel, discord.DMChannel):
         history = []
@@ -216,6 +239,116 @@ async def _build_transcript(channel: discord.abc.Messageable, limit: int) -> str
     return "\n".join(reversed(history))
 
 
+def _is_case_channel(message: discord.Message) -> tuple[str | None, str | None]:
+    state = _read_state()
+    if not isinstance(message.channel, discord.Thread):
+        return None, None
+    thread_id = str(message.channel.id)
+    for entry in state.get("case_threads", {}).values():
+        if str(entry.get("thread_id")) == thread_id:
+            return str(entry.get("case_type") or ""), str(entry.get("case_id") or "")
+    return None, None
+
+
+async def _get_or_create_case_thread(
+    message: discord.Message,
+    *,
+    case_type: str,
+    case_id: str,
+) -> discord.abc.Messageable:
+    state = _read_state()
+    existing = get_case_thread(state, case_type, case_id)
+    if existing and existing.get("thread_id"):
+        thread = client.get_channel(int(existing["thread_id"]))
+        if thread is None:
+            try:
+                thread = await client.fetch_channel(int(existing["thread_id"]))
+            except Exception:
+                thread = None
+        if thread is not None:
+            return thread
+
+    if isinstance(message.channel, discord.Thread):
+        upsert_case_thread(
+            state,
+            case_type=case_type,
+            case_id=case_id,
+            thread_id=str(message.channel.id),
+            channel_id=str(message.channel.parent_id or message.channel.id),
+            thread_name=message.channel.name,
+            source_message_id=str(message.id),
+        )
+        mark_case_thread_human_touch(state, case_type=case_type, case_id=case_id)
+        _write_state(state)
+        return message.channel
+
+    if not hasattr(message, "create_thread") or isinstance(message.channel, discord.DMChannel):
+        return message.channel
+
+    thread = await message.create_thread(
+        name=build_case_thread_title(case_type, case_id),
+        auto_archive_duration=config.OPENCLAW_DISCORD_THREAD_AUTO_ARCHIVE_MINUTES,
+    )
+    upsert_case_thread(
+        state,
+        case_type=case_type,
+        case_id=case_id,
+        thread_id=str(thread.id),
+        channel_id=str(message.channel.id),
+        thread_name=thread.name,
+        source_message_id=str(message.id),
+    )
+    mark_case_thread_human_touch(state, case_type=case_type, case_id=case_id)
+    _write_state(state)
+    return thread
+
+
+async def _send_text(target: discord.abc.Messageable, text: str, *, files: list[discord.File] | None = None) -> None:
+    chunks = _split_for_discord(text)
+    if chunks:
+        await target.send(chunks[0], files=files or [])
+        for chunk in chunks[1:]:
+            await target.send(chunk)
+    else:
+        await target.send(files=files or [])
+
+
+def _export_brief_path() -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return config.CHATOPS_EXPORTS_DIR / f"{timestamp}-discord-oof-brief.md"
+
+
+def _update_case_memory(
+    *,
+    state: Dict[str, Any],
+    channel_id: str,
+    case_type: str | None = None,
+    case_id: str | None = None,
+    last_command: str | None = None,
+    analyst_intent: str | None = None,
+    goal: str | None = None,
+) -> None:
+    last_discussed_case = None
+    if case_type and case_id:
+        thread = get_case_thread(state, case_type, case_id)
+        last_discussed_case = {
+            "case_type": case_type,
+            "case_id": case_id,
+            "thread_id": thread.get("thread_id") if thread else "",
+        }
+        mark_case_thread_human_touch(state, case_type=case_type, case_id=case_id)
+
+    update_channel_workspace(
+        state,
+        channel_id=channel_id,
+        last_command=last_command,
+        last_goal=goal,
+        analyst_intent=analyst_intent,
+        last_discussed_case=last_discussed_case,
+    )
+    _write_state(state)
+
+
 async def _send_reply(message: discord.Message, text: str) -> None:
     for chunk in _split_for_discord(text):
         await message.channel.send(chunk)
@@ -230,6 +363,20 @@ async def _send_reply_with_files(message: discord.Message, text: str, files: lis
             await message.channel.send(chunk)
         return
     await message.channel.send(files=discord_files)
+
+
+async def _send_image_analysis_result(message: discord.Message, analysis: Dict[str, Any]) -> None:
+    files = [
+        discord.File(str(analysis["export_paths"]["markdown"]), filename=Path(analysis["export_paths"]["markdown"]).name),
+        discord.File(str(analysis["export_paths"]["json"]), filename=Path(analysis["export_paths"]["json"]).name),
+    ]
+    case_type = analysis.get("primary_case_type")
+    case_id = analysis.get("primary_case_id")
+    if case_type and case_id:
+        target = await _get_or_create_case_thread(message, case_type=case_type, case_id=case_id)
+        await _send_text(target, analysis["reply_text"], files=files)
+        return
+    await _send_text(message.channel, analysis["reply_text"], files=files)
 
 
 async def _process_pending_upload(
@@ -263,14 +410,29 @@ async def _process_pending_upload(
         return True
 
     requested_actions = sorted(set(pending.get("requested_actions", []) + actions["requested_actions"]))
-    result = process_saved_csv_upload(
-        file_path=Path(pending["file_path"]),
-        file_name=pending["file_name"],
-        csv_type=csv_type,
-        requested_actions=requested_actions,
-        goal_text=instruction_text.strip(),
-    )
+    async with message.channel.typing():
+        result = await _run_blocking(
+            process_saved_csv_upload,
+            file_path=Path(pending["file_path"]),
+            file_name=pending["file_name"],
+            csv_type=csv_type,
+            requested_actions=requested_actions,
+            goal_text=instruction_text.strip(),
+        )
     channel_state["pending_upload"] = None
+    update_channel_workspace(
+        state,
+        channel_id=str(message.channel.id),
+        last_goal=instruction_text.strip(),
+        analyst_intent="csv_followup_processing",
+        uploaded_csv_entry={
+            "file_name": pending["file_name"],
+            "csv_type": csv_type,
+            "goal_text": instruction_text.strip(),
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "export_dir": str(result["export_dir"]),
+        },
+    )
     _write_state(state)
     await _send_reply_with_files(message, result["reply_text"], result["files"])
     return True
@@ -299,6 +461,13 @@ async def _handle_csv_upload(
         "row_count": inspection["row_count"],
         "columns": inspection["columns"],
     }
+    update_channel_workspace(
+        state,
+        channel_id=str(message.channel.id),
+        last_goal=inspection["goal_text"],
+        analyst_intent="csv_upload",
+        last_command="csv_upload",
+    )
     _write_state(state)
 
     if inspection["needs_clarification"]:
@@ -313,16 +482,255 @@ async def _handle_csv_upload(
         await _send_reply(message, preview_text)
         return True
 
-    result = process_saved_csv_upload(
-        file_path=stored_path,
-        file_name=attachment.filename,
-        csv_type=inspection["selected_type"],
-        requested_actions=inspection["requested_actions"],
-        goal_text=inspection["goal_text"],
-    )
+    async with message.channel.typing():
+        result = await _run_blocking(
+            process_saved_csv_upload,
+            file_path=stored_path,
+            file_name=attachment.filename,
+            csv_type=inspection["selected_type"],
+            requested_actions=inspection["requested_actions"],
+            goal_text=inspection["goal_text"],
+        )
     channel_state["pending_upload"] = None
+    update_channel_workspace(
+        state,
+        channel_id=str(message.channel.id),
+        last_goal=inspection["goal_text"],
+        analyst_intent="csv_upload_processing",
+        uploaded_csv_entry={
+            "file_name": attachment.filename,
+            "csv_type": inspection["selected_type"],
+            "goal_text": inspection["goal_text"],
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "export_dir": str(result["export_dir"]),
+        },
+    )
     _write_state(state)
     await _send_reply_with_files(message, result["reply_text"], result["files"])
+    return True
+
+
+async def _process_pending_image(
+    *,
+    message: discord.Message,
+    state: Dict[str, Any],
+    channel_state: Dict[str, Any],
+    instruction_text: str,
+) -> bool:
+    pending = channel_state.get("pending_image")
+    if not pending:
+        return False
+
+    image_path = Path(str(pending.get("file_path", "")))
+    if not image_path.exists():
+        channel_state["pending_image"] = None
+        _write_state(state)
+        await _send_reply(message, "The pending image could not be found anymore. Upload it again and I will review it.")
+        return True
+
+    goal_text = _normalize_image_goal(instruction_text) or "Analyze this image for fraud or anomaly indicators."
+    async with message.channel.typing():
+        analysis = await _run_blocking(analyze_uploaded_image, image_path, user_prompt=goal_text)
+    channel_state["pending_image"] = None
+    update_channel_workspace(
+        state,
+        channel_id=str(message.channel.id),
+        last_goal=goal_text,
+        last_command=instruction_text.strip(),
+        analyst_intent="image_followup_processing",
+        uploaded_image_entry={
+            "file_name": pending.get("file_name", image_path.name),
+            "file_path": str(image_path),
+            "goal_text": goal_text,
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "image_type": analysis["structured_output"].get("image_type", ""),
+            "export_dir": str(config.CHATOPS_IMAGE_EXPORTS_DIR),
+        },
+        last_image_analysis={
+            "file_name": image_path.name,
+            "image_path": str(image_path),
+            "image_type": analysis["structured_output"].get("image_type", ""),
+            "primary_case_type": analysis.get("primary_case_type"),
+            "primary_case_id": analysis.get("primary_case_id"),
+        },
+    )
+    _write_state(state)
+    await _send_image_analysis_result(message, analysis)
+    return True
+
+
+async def _handle_image_upload(
+    *,
+    message: discord.Message,
+    state: Dict[str, Any],
+    channel_state: Dict[str, Any],
+    content: str,
+) -> bool:
+    attachment = _find_image_attachment(message)
+    if not attachment:
+        return False
+
+    file_bytes = await attachment.read()
+    stored_path = save_uploaded_image(file_bytes, file_name=attachment.filename, channel_id=str(message.channel.id))
+    goal_text = _normalize_image_goal(content)
+
+    channel_state["pending_image"] = {
+        "file_path": str(stored_path),
+        "file_name": attachment.filename,
+    }
+    update_channel_workspace(
+        state,
+        channel_id=str(message.channel.id),
+        last_goal=goal_text,
+        analyst_intent="image_upload",
+        last_command=content.strip() or "image_upload",
+    )
+    _write_state(state)
+
+    if not goal_text:
+        await _send_reply(
+            message,
+            (
+                f"I saved `{attachment.filename}` for review. Tell me what you want me to do with it, for example:\n"
+                "- `analyze this`\n"
+                "- `is this suspicious?`\n"
+                "- `compare this to current flagged patterns`\n"
+                "- `what should OOF do next based on this image?`"
+            ),
+        )
+        return True
+
+    async with message.channel.typing():
+        analysis = await _run_blocking(analyze_uploaded_image, stored_path, user_prompt=goal_text)
+    channel_state["pending_image"] = None
+    update_channel_workspace(
+        state,
+        channel_id=str(message.channel.id),
+        last_goal=goal_text,
+        last_command=content.strip() or "image_upload",
+        analyst_intent="image_upload_processing",
+        uploaded_image_entry={
+            "file_name": attachment.filename,
+            "file_path": str(stored_path),
+            "goal_text": goal_text,
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "image_type": analysis["structured_output"].get("image_type", ""),
+            "export_dir": str(config.CHATOPS_IMAGE_EXPORTS_DIR),
+        },
+        last_image_analysis={
+            "file_name": attachment.filename,
+            "image_path": str(stored_path),
+            "image_type": analysis["structured_output"].get("image_type", ""),
+            "primary_case_type": analysis.get("primary_case_type"),
+            "primary_case_id": analysis.get("primary_case_id"),
+        },
+    )
+    _write_state(state)
+    await _send_image_analysis_result(message, analysis)
+    return True
+
+
+async def _handle_image_command(
+    *,
+    message: discord.Message,
+    state: Dict[str, Any],
+    channel_state: Dict[str, Any],
+    content: str,
+) -> bool:
+    lowered = content.strip().lower()
+    if not lowered.startswith("/analyze-image") and not lowered.startswith("/fraud-image-review"):
+        return False
+
+    workspace = channel_state.get("workspace", {}) or {}
+    image_history = workspace.get("uploaded_image_history", []) or []
+    last_image = (image_history[-1] if image_history else None) or (workspace.get("last_image_analysis") or {})
+    image_path = Path(str(last_image.get("file_path") or last_image.get("image_path") or ""))
+    if not image_path.exists():
+        await _send_reply(
+            message,
+            "Upload an image first, or send `/analyze-image` together with a PNG, JPG, JPEG, or WEBP attachment.",
+        )
+        return True
+
+    goal_text = _normalize_image_goal(content) or "Analyze this image for fraud or anomaly indicators."
+    async with message.channel.typing():
+        analysis = await _run_blocking(analyze_uploaded_image, image_path, user_prompt=goal_text)
+    update_channel_workspace(
+        state,
+        channel_id=str(message.channel.id),
+        last_goal=goal_text,
+        last_command=content.strip(),
+        analyst_intent="image_command",
+        uploaded_image_entry={
+            "file_name": last_image.get("file_name", image_path.name),
+            "file_path": str(image_path),
+            "goal_text": goal_text,
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "image_type": analysis["structured_output"].get("image_type", ""),
+            "export_dir": str(config.CHATOPS_IMAGE_EXPORTS_DIR),
+        },
+        last_image_analysis={
+            "file_name": image_path.name,
+            "image_path": str(image_path),
+            "image_type": analysis["structured_output"].get("image_type", ""),
+            "primary_case_type": analysis.get("primary_case_type"),
+            "primary_case_id": analysis.get("primary_case_id"),
+        },
+    )
+    _write_state(state)
+    await _send_image_analysis_result(message, analysis)
+    return True
+
+
+async def _handle_command_workflow(message: discord.Message, state: Dict[str, Any], content: str) -> bool:
+    if not content.strip().startswith("/"):
+        return False
+
+    if content.strip().lower() in {"/fraud-report", "/fraud-alerts"}:
+        return False
+
+    async with message.channel.typing():
+        bundle = await _run_blocking(load_active_bundle)
+        command_result = await _run_blocking(run_command_workflow, content, bundle=bundle)
+    if not command_result.get("handled"):
+        return False
+
+    case_type = command_result.get("case_type")
+    case_id = command_result.get("case_id")
+    answer = command_result.get("answer", "No response available.")
+    used_ai = bool(command_result.get("used_ai"))
+    export_files: list[discord.File] = []
+    export_path = command_result.get("export_path")
+    if export_path:
+        export_files.append(discord.File(str(export_path), filename=Path(export_path).name))
+
+    if content.strip().lower().startswith("/send-oof-brief") and not export_path:
+        brief_path = _export_brief_path()
+        async with message.channel.typing():
+            brief = await _run_blocking(create_oof_brief, bundle=bundle, focus=content.strip(), export_path=brief_path)
+        answer = build_oof_brief_message(
+            brief["answer"],
+            source_label=bundle.get("source_label", "Fraud dashboard"),
+            focus=content.strip(),
+        ).text
+        export_files = [discord.File(str(brief_path), filename=brief_path.name)]
+        used_ai = bool(brief.get("used_ai"))
+
+    _update_case_memory(
+        state=state,
+        channel_id=str(message.channel.id),
+        case_type=case_type,
+        case_id=case_id,
+        last_command=content.strip(),
+        analyst_intent="command_workflow",
+        goal=content.strip(),
+    )
+
+    if case_type and case_id:
+        target = await _get_or_create_case_thread(message, case_type=case_type, case_id=case_id)
+        await _send_text(target, answer, files=export_files)
+    else:
+        await _send_text(message.channel, answer, files=export_files)
     return True
 
 
@@ -357,6 +765,16 @@ async def on_message(message: discord.Message) -> None:
     channel_state["last_human_at"] = datetime.now(timezone.utc).isoformat()
     _write_state(state)
 
+    thread_case_type, thread_case_id = _is_case_channel(message)
+    if thread_case_type and thread_case_id:
+        _update_case_memory(
+            state=state,
+            channel_id=str(message.channel.id),
+            case_type=thread_case_type,
+            case_id=thread_case_id,
+            analyst_intent="case_thread_discussion",
+        )
+
     content = message.content.strip()
 
     if config.DISCORD_REPLY_ONLY_ON_MENTION:
@@ -375,10 +793,32 @@ async def on_message(message: discord.Message) -> None:
             instruction_text=content,
         ):
             return
+
+        if await _handle_image_upload(message=message, state=state, channel_state=channel_state, content=content):
+            return
+
+        if channel_state.get("pending_image") and content and await _process_pending_image(
+            message=message,
+            state=state,
+            channel_state=channel_state,
+            instruction_text=content,
+        ):
+            return
+
+        if content and await _handle_image_command(
+            message=message,
+            state=state,
+            channel_state=channel_state,
+            content=content,
+        ):
+            return
+
+        if content and await _handle_command_workflow(message, state, content):
+            return
     except Exception as exc:
         await _send_reply(
             message,
-            f"I couldn't process that CSV cleanly: {exc}",
+            f"I couldn't process that upload cleanly: {exc}",
         )
         return
 
@@ -389,9 +829,10 @@ async def on_message(message: discord.Message) -> None:
     if lowered in {"!help", "/help", "help"}:
         await _send_reply(
             message,
-            "I can answer grounded fraud questions, send the current fraud report, show active alerts, and process CSV uploads. "
-            "If you upload a CSV, I will ask what you want back if the goal is not clear. "
-            "You can ask for a `report`, `annotated csv`, `cleaned csv`, or `both`.",
+            "I can answer grounded fraud questions, send the current fraud report, show active alerts, process CSV uploads, and run workflow commands. "
+            "Try `/triage TX000275`, `/top-accounts`, `/pending-review`, `/merchant M026`, `/send-oof-brief`, or `/analyze-image`. "
+            "If you upload a CSV, I will ask what you want back if the goal is not clear. You can ask for a `report`, `annotated csv`, `cleaned csv`, or `both`. "
+            "If you upload a PNG, JPG, JPEG, or WEBP image, ask things like `analyze this`, `is this suspicious?`, `compare this to current flagged patterns`, or `what should OOF do next based on this image?`.",
         )
         return
 
@@ -402,8 +843,9 @@ async def on_message(message: discord.Message) -> None:
 
     if lowered in {"!clearupload", "/clear-upload", "clear upload"}:
         channel_state["pending_upload"] = None
+        channel_state["pending_image"] = None
         _write_state(state)
-        await _send_reply(message, "Cleared the pending CSV upload for this channel.")
+        await _send_reply(message, "Cleared the pending upload state for this channel.")
         return
 
     if lowered in {"/fraud-alerts", "fraud alerts", "show fraud alerts"}:
@@ -412,10 +854,23 @@ async def on_message(message: discord.Message) -> None:
         return
 
     transcript = await _build_transcript(message.channel, config.OPENCLAW_DISCORD_MAX_CONTEXT_MESSAGES)
-    response = answer_analyst_question(content, conversation_context=transcript)
+    async with message.channel.typing():
+        response = await _run_blocking(answer_analyst_question, content, conversation_context=transcript)
     answer = response["answer"]
-    for chunk in _split_for_discord(answer):
-        await message.channel.send(chunk)
+    _update_case_memory(
+        state=state,
+        channel_id=str(message.channel.id),
+        case_type=response.get("case_type"),
+        case_id=response.get("case_id"),
+        last_command=content,
+        analyst_intent="natural_language_qna",
+        goal=content,
+    )
+    if response.get("case_type") and response.get("case_id"):
+        target = await _get_or_create_case_thread(message, case_type=response["case_type"], case_id=response["case_id"])
+        await _send_text(target, answer)
+        return
+    await _send_text(message.channel, answer)
 
 
 @tasks.loop(minutes=config.OPENCLAW_DISCORD_PROACTIVE_POLL_MINUTES)
@@ -461,12 +916,41 @@ async def proactive_loop() -> None:
             continue
 
         reminder_cursor = int(channel_state.get("reminder_cursor", 0) or 0)
-        for chunk in _split_for_discord(_format_reminder_text(reminder_cursor)):
-            await channel.send(chunk)
+        reminder_message = _build_proactive_case_message(reminder_cursor, escalated=False)
+        case_type = (reminder_message.metadata or {}).get("case_type")
+        case_id = (reminder_message.metadata or {}).get("case_id")
+        escalated = False
+        if case_type and case_id:
+            case_entry = get_case_thread(state, str(case_type), str(case_id))
+            last_touch_raw = (case_entry or {}).get("last_human_touch_at") or (case_entry or {}).get("last_activity_at")
+            if last_touch_raw:
+                try:
+                    last_touch_dt = datetime.fromisoformat(str(last_touch_raw))
+                except Exception:
+                    last_touch_dt = now - timedelta(hours=config.OPENCLAW_DISCORD_CASE_ESCALATION_HOURS + 1)
+                escalated = now - last_touch_dt >= timedelta(hours=config.OPENCLAW_DISCORD_CASE_ESCALATION_HOURS)
+            if escalated:
+                reminder_message = _build_proactive_case_message(reminder_cursor, escalated=True)
+
+        target_channel = channel
+        if case_type and case_id:
+            case_entry = get_case_thread(state, str(case_type), str(case_id))
+            thread_id = (case_entry or {}).get("thread_id")
+            if thread_id:
+                target_channel = client.get_channel(int(thread_id)) or await client.fetch_channel(int(thread_id))
+
+        for chunk in _split_for_discord(_render_chatops_message(reminder_message)):
+            await target_channel.send(chunk)
 
         channel_state["last_proactive_at"] = now.isoformat()
         channel_state["proactive_count_today"] = int(channel_state.get("proactive_count_today", 0) or 0) + 1
         channel_state["reminder_cursor"] = reminder_cursor + 1
+        update_channel_workspace(
+            state,
+            channel_id=channel_id,
+            analyst_intent="proactive_case_reminder",
+            last_discussed_case={"case_type": case_type, "case_id": case_id, "thread_id": str(getattr(target_channel, 'id', ''))} if case_type and case_id else None,
+        )
         _write_state(state)
 
 

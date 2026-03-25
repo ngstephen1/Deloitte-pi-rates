@@ -316,7 +316,7 @@ def render_sidebar(page_name: str, data: Dict[str, Any]) -> str:
                 <div style="font-size:0.78rem; letter-spacing:0.14em; text-transform:uppercase; color:#d5e1da; font-weight:800;">
                     Navigation
                 </div>
-                <div style="font-size:1.25rem; font-weight:800; margin-top:0.45rem;">Fraud Intelligence</div>
+                <div style="font-size:1.25rem; font-weight:800; margin-top:0.45rem; color:#ffffff;">Fraud Intelligence</div>
                 <div style="color:#eef4ef; margin-top:0.35rem; line-height:1.5;">
                     Executive monitoring, upload triage, AI guidance, and analyst review in one workspace.
                 </div>

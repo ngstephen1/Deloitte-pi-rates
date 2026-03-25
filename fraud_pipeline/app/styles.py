@@ -604,9 +604,9 @@ def render_app_header(title: str, subtitle: str, logo_path: Optional[Path] = Non
         <section class="hero-card">
             <div class="hero-row">
                 <div class="hero-copy">
-                    <div class="hero-kicker">Office of Oversight and Finance</div>
-                    <h1 class="hero-title">{title}</h1>
-                    <div class="hero-subtitle">{subtitle}</div>
+                    <div class="hero-kicker" style="color:#f6faf4 !important;">Office of Oversight and Finance</div>
+                    <h1 class="hero-title" style="color:#ffffff !important;">{title}</h1>
+                    <div class="hero-subtitle" style="color:#f6faf4 !important;">{subtitle}</div>
                 </div>
                 {logo_markup}
             </div>

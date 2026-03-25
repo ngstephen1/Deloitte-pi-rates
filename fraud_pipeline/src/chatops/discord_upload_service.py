@@ -13,7 +13,12 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from .. import config
-from ..ai_assistant import answer_data_question, generate_ai_recommendations, rule_based_recommendations
+from ..ai_assistant import (
+    answer_data_question,
+    generate_ai_recommendations,
+    generate_multi_agent_oof_brief,
+    rule_based_recommendations,
+)
 from ..dashboard_data import CSV_TYPE_EXPECTATIONS, bundle_from_uploaded_csv, validate_uploaded_csv
 from ..utils import LOGGER
 from .context_loader import build_review_summary, publish_bundle_context
@@ -447,6 +452,18 @@ def process_saved_csv_upload(
     annotated_frame = pd.DataFrame()
     cleaned_path = None
 
+    oof_brief = None
+    if any(token in goal_text.lower() for token in ["oof", "executive", "brief", "oversight", "finance"]) and csv_type != "Analyst review log":
+        oof_brief = generate_multi_agent_oof_brief(
+            bundle,
+            focus=goal_text,
+            model=config.OPENCLAW_OPENAI_MODEL,
+            reasoning_effort=config.OPENCLAW_OPENAI_REASONING_EFFORT,
+        )
+        oof_brief_path = export_dir / f"{stem}-oof-brief.md"
+        oof_brief_path.write_text(oof_brief["brief_markdown"])
+        files.append(oof_brief_path)
+
     if csv_type == "Analyst review log":
         annotated_frame = build_annotated_review_log_csv(bundle.get("review_log", pd.DataFrame()))
     else:
@@ -494,4 +511,5 @@ def process_saved_csv_upload(
         "files": files,
         "export_dir": export_dir,
         "cleaned_path": cleaned_path,
+        "oof_brief": oof_brief,
     }

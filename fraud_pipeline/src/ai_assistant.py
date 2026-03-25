@@ -7,7 +7,11 @@ data bundle loaded in Streamlit or produced by the backend pipeline.
 
 from __future__ import annotations
 
+import json
 import os
+import ssl
+import urllib.error
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -16,13 +20,13 @@ from . import config
 from .utils import LOGGER
 
 
+def has_openai_api_key() -> bool:
+    return bool(os.environ.get("OPENAI_API_KEY"))
+
+
 def is_ai_enabled() -> bool:
     """Return True when AI features are enabled in config and an API key exists."""
     return bool(config.ENABLE_AI_FEATURES and has_openai_api_key())
-
-
-def has_openai_api_key() -> bool:
-    return bool(os.environ.get("OPENAI_API_KEY"))
 
 
 def ai_availability_message() -> str:
@@ -30,13 +34,103 @@ def ai_availability_message() -> str:
         return "AI features are disabled in config.py."
     if not has_openai_api_key():
         return "Set OPENAI_API_KEY to enable live AI recommendations, Q&A, and case explanations."
-    return "AI features are available."
+    return f"AI features are available via {config.OPENAI_MODEL}."
 
 
-def _get_client():
-    from openai import OpenAI
+def _build_response_payload(instructions: str, prompt: str, max_output_tokens: int) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": config.OPENAI_MODEL,
+        "instructions": instructions,
+        "input": prompt,
+        "max_output_tokens": max_output_tokens,
+        "store": False,
+    }
+    if config.OPENAI_REASONING_EFFORT:
+        payload["reasoning"] = {"effort": config.OPENAI_REASONING_EFFORT}
+    return payload
 
-    return OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+def _extract_output_text(response_payload: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(response_payload, dict):
+        return None
+
+    output_text = response_payload.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    fragments: List[str] = []
+    for item in response_payload.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []) or []:
+            if not isinstance(content, dict):
+                continue
+            text = content.get("text") or content.get("output_text")
+            if isinstance(text, str) and text.strip():
+                fragments.append(text.strip())
+
+    return "\n".join(fragments).strip() or None
+
+
+def _request_ai_response_http(instructions: str, prompt: str, max_output_tokens: int) -> Optional[str]:
+    payload = _build_response_payload(instructions, prompt, max_output_tokens)
+    ssl_context = None
+    try:
+        import certifi
+
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ssl_context = None
+
+    request = urllib.request.Request(
+        url=f"{config.OPENAI_API_BASE_URL.rstrip('/')}/responses",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=config.OPENAI_REQUEST_TIMEOUT_SECONDS,
+            context=ssl_context,
+        ) as response:
+            body = response.read().decode("utf-8")
+        return _extract_output_text(json.loads(body))
+    except urllib.error.HTTPError as exc:
+        try:
+            error_body = exc.read().decode("utf-8")
+        except Exception:
+            error_body = ""
+        LOGGER.warning(f"AI HTTP request failed: status={exc.code}, body={error_body[:300]}")
+    except Exception as exc:
+        LOGGER.warning(f"AI HTTP transport failed: {exc}")
+    return None
+
+
+def _request_ai_response_sdk(instructions: str, prompt: str, max_output_tokens: int) -> Optional[str]:
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        response = client.responses.create(
+            model=config.OPENAI_MODEL,
+            instructions=instructions,
+            input=prompt,
+            max_output_tokens=max_output_tokens,
+            store=False,
+            reasoning={"effort": config.OPENAI_REASONING_EFFORT} if config.OPENAI_REASONING_EFFORT else None,
+        )
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            return output_text.strip()
+        return _extract_output_text(response.model_dump())
+    except Exception as exc:
+        LOGGER.warning(f"AI SDK transport failed: {exc}")
+    return None
 
 
 def request_ai_response(
@@ -49,92 +143,17 @@ def request_ai_response(
     if not is_ai_enabled():
         return None
 
-    try:
-        client = _get_client()
-        response = client.responses.create(
-            model=config.OPENAI_MODEL,
-            instructions=instructions,
-            input=prompt,
-            max_output_tokens=max_output_tokens,
-            store=False,
-        )
-        output_text = getattr(response, "output_text", None)
-        if output_text:
-            return output_text.strip()
-    except Exception as exc:
-        LOGGER.warning(f"AI request failed: {exc}")
+    transport_preference = str(config.OPENAI_TRANSPORT_PREFERENCE).lower()
+    transports = ["http", "sdk"] if transport_preference != "sdk" else ["sdk", "http"]
+
+    for transport in transports:
+        if transport == "http":
+            text = _request_ai_response_http(instructions, prompt, max_output_tokens)
+        else:
+            text = _request_ai_response_sdk(instructions, prompt, max_output_tokens)
+        if text:
+            return text
     return None
-
-
-def bundle_context_summary(bundle: Dict[str, Any], max_rows: int = config.AI_MAX_CONTEXT_ROWS) -> str:
-    """
-    Build a compact, grounded context block from the active data bundle.
-    """
-    summary = bundle.get("summary", {}) or {}
-    transactions = bundle.get("transactions", pd.DataFrame())
-    accounts = bundle.get("accounts", pd.DataFrame())
-    merchants = bundle.get("merchants", pd.DataFrame())
-    devices = bundle.get("devices", pd.DataFrame())
-    locations = bundle.get("locations", pd.DataFrame())
-
-    context_blocks = [
-        f"Source: {bundle.get('source_label', 'Pipeline outputs')}",
-        (
-            "Summary: "
-            f"transactions={summary.get('total_transactions', len(transactions))}, "
-            f"flagged={summary.get('flagged_transactions', 0)}, "
-            f"high_risk={summary.get('high_risk_count', 0)}, "
-            f"high_risk_accounts={summary.get('high_risk_accounts', 0)}, "
-            f"high_risk_merchants={summary.get('high_risk_merchants', 0)}, "
-            f"high_risk_devices={summary.get('high_risk_devices', 0)}, "
-            f"high_risk_locations={summary.get('high_risk_locations', 0)}, "
-            f"volume={summary.get('total_transaction_volume', 0):,.2f}"
-        ),
-    ]
-
-    if not transactions.empty:
-        risk_mix = transactions["risk_level"].value_counts().to_dict() if "risk_level" in transactions else {}
-        context_blocks.append(f"Risk mix: {risk_mix}")
-
-        top_transactions = transactions.head(max_rows)[
-            [
-                column
-                for column in [
-                    "transactionid",
-                    "accountid",
-                    "merchantid",
-                    "location",
-                    "channel",
-                    "transactionamount",
-                    "composite_risk_score",
-                    "risk_level",
-                ]
-                if column in transactions.columns
-            ]
-        ]
-        if not top_transactions.empty:
-            context_blocks.append(f"Top transactions:\n{top_transactions.to_csv(index=False)}")
-
-        channel_table = summarize_channel_risk(transactions)
-        if not channel_table.empty:
-            context_blocks.append(f"Channel risk:\n{channel_table.head(max_rows).to_csv(index=False)}")
-
-        feature_signals = compute_feature_signal_summary(transactions)
-        if feature_signals:
-            context_blocks.append(f"Signal summary: {feature_signals}")
-
-    for label, df, columns in [
-        ("Top accounts", accounts, ["accountid", "account_risk_score", "transaction_count", "high_risk_transaction_count"]),
-        ("Top merchants", merchants, ["merchantid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"]),
-        ("Top devices", devices, ["deviceid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"]),
-        ("Top locations", locations, ["location", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"]),
-    ]:
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            view = df.head(max_rows)[[column for column in columns if column in df.columns]]
-            if not view.empty:
-                context_blocks.append(f"{label}:\n{view.to_csv(index=False)}")
-
-    return "\n\n".join(context_blocks)
 
 
 def summarize_channel_risk(transactions: pd.DataFrame) -> pd.DataFrame:
@@ -169,10 +188,99 @@ def compute_feature_signal_summary(transactions: pd.DataFrame) -> Dict[str, floa
     return summary
 
 
+def _top_entity_rows(df: pd.DataFrame, columns: List[str], max_rows: int) -> Optional[str]:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    view = df.head(max_rows)[[column for column in columns if column in df.columns]]
+    if view.empty:
+        return None
+    return view.to_csv(index=False)
+
+
+def _flagged_transactions(transactions: pd.DataFrame) -> pd.DataFrame:
+    if transactions.empty or "risk_level" not in transactions.columns:
+        return transactions
+    flagged = transactions[transactions["risk_level"].isin(["High", "Medium"])].copy()
+    return flagged if not flagged.empty else transactions.copy()
+
+
+def bundle_context_summary(bundle: Dict[str, Any], max_rows: int = config.AI_MAX_CONTEXT_ROWS) -> str:
+    """
+    Build a compact, grounded context block from the active data bundle.
+    """
+    summary = bundle.get("summary", {}) or {}
+    transactions = bundle.get("transactions", pd.DataFrame())
+    accounts = bundle.get("accounts", pd.DataFrame())
+    merchants = bundle.get("merchants", pd.DataFrame())
+    devices = bundle.get("devices", pd.DataFrame())
+    locations = bundle.get("locations", pd.DataFrame())
+    flagged = _flagged_transactions(transactions)
+
+    context_blocks = [
+        f"Source: {bundle.get('source_label', 'Pipeline outputs')}",
+        (
+            "Summary: "
+            f"transactions={summary.get('total_transactions', len(transactions))}, "
+            f"flagged={summary.get('flagged_transactions', 0)}, "
+            f"high_risk={summary.get('high_risk_count', 0)}, "
+            f"high_risk_accounts={summary.get('high_risk_accounts', 0)}, "
+            f"high_risk_merchants={summary.get('high_risk_merchants', 0)}, "
+            f"high_risk_devices={summary.get('high_risk_devices', 0)}, "
+            f"high_risk_locations={summary.get('high_risk_locations', 0)}, "
+            f"volume={summary.get('total_transaction_volume', 0):,.2f}"
+        ),
+    ]
+
+    if not transactions.empty:
+        risk_mix = transactions["risk_level"].value_counts().to_dict() if "risk_level" in transactions else {}
+        context_blocks.append(f"Risk mix: {risk_mix}")
+
+        transaction_columns = [
+            column
+            for column in [
+                "transactionid",
+                "accountid",
+                "merchantid",
+                "location",
+                "deviceid",
+                "channel",
+                "transactionamount",
+                "composite_risk_score",
+                "risk_level",
+            ]
+            if column in transactions.columns
+        ]
+        top_transactions = transactions.head(max_rows)[transaction_columns]
+        if not top_transactions.empty:
+            context_blocks.append(f"Top transactions:\n{top_transactions.to_csv(index=False)}")
+
+        top_flagged = flagged.head(max_rows)[transaction_columns]
+        if not top_flagged.empty:
+            context_blocks.append(f"Flagged transactions:\n{top_flagged.to_csv(index=False)}")
+
+        channel_table = summarize_channel_risk(transactions)
+        if not channel_table.empty:
+            context_blocks.append(f"Channel risk:\n{channel_table.head(max_rows).to_csv(index=False)}")
+
+        feature_signals = compute_feature_signal_summary(transactions)
+        if feature_signals:
+            context_blocks.append(f"Signal summary: {feature_signals}")
+
+    for label, df, columns in [
+        ("Top accounts", accounts, ["accountid", "account_risk_score", "transaction_count", "high_risk_transaction_count"]),
+        ("Top merchants", merchants, ["merchantid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"]),
+        ("Top devices", devices, ["deviceid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"]),
+        ("Top locations", locations, ["location", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"]),
+    ]:
+        table = _top_entity_rows(df, columns, max_rows)
+        if table:
+            context_blocks.append(f"{label}:\n{table}")
+
+    return "\n\n".join(context_blocks)
+
+
 def rule_based_recommendations(bundle: Dict[str, Any]) -> List[str]:
-    """
-    Deterministic recommendations grounded in current results.
-    """
+    """Deterministic recommendations grounded in current results."""
     recommendations: List[str] = []
     transactions = bundle.get("transactions", pd.DataFrame())
     accounts = bundle.get("accounts", pd.DataFrame())
@@ -188,16 +296,14 @@ def rule_based_recommendations(bundle: Dict[str, Any]) -> List[str]:
 
     if isinstance(merchants, pd.DataFrame) and not merchants.empty:
         top_merchant = merchants.iloc[0]
-        merchant_id = top_merchant.get("merchantid", "N/A")
         recommendations.append(
-            f"Prioritize merchant {merchant_id}; it has the highest merchant-level risk exposure in the current dataset."
+            f"Prioritize merchant {top_merchant.get('merchantid', 'N/A')}; it leads the merchant risk ranking in the current portfolio."
         )
 
     if isinstance(locations, pd.DataFrame) and not locations.empty:
         top_location = locations.iloc[0]
-        location_name = top_location.get("location", "N/A")
         recommendations.append(
-            f"Increase monitoring on {location_name}; it is the most risk-concentrated location in the active view."
+            f"Increase monitoring on {top_location.get('location', 'N/A')}; it is the most risk-concentrated location in the active view."
         )
 
     if isinstance(transactions, pd.DataFrame) and not transactions.empty:
@@ -205,7 +311,7 @@ def rule_based_recommendations(bundle: Dict[str, Any]) -> List[str]:
         if not channel_table.empty:
             top_channel = channel_table.iloc[0]
             recommendations.append(
-                f"Apply tighter controls to the {top_channel['channel']} channel; it shows the highest average transaction risk."
+                f"Apply tighter controls to the {top_channel['channel']} channel; it has the highest average transaction risk."
             )
 
         signal_summary = compute_feature_signal_summary(transactions)
@@ -232,8 +338,7 @@ def rule_based_reminders(bundle: Dict[str, Any]) -> List[str]:
     if isinstance(transactions, pd.DataFrame) and not transactions.empty:
         channel_table = summarize_channel_risk(transactions)
         if not channel_table.empty:
-            top_channel = channel_table.iloc[0]["channel"]
-            reminders.append(f"{top_channel} transactions currently show the highest average risk score.")
+            reminders.append(f"{channel_table.iloc[0]['channel']} transactions currently show the highest average risk score.")
 
         feature_signals = compute_feature_signal_summary(transactions)
         if feature_signals.get("device_change_flagged_mean", 0) > feature_signals.get("device_change_flag_overall_mean", 0):
@@ -244,21 +349,45 @@ def rule_based_reminders(bundle: Dict[str, Any]) -> List[str]:
     return reminders[:4]
 
 
+def _strongest_risk_components(case_row: pd.Series) -> str:
+    component_map = {
+        "Isolation Forest": float(case_row.get("isolation_forest_score", 0) or 0),
+        "Local Outlier Factor": float(case_row.get("lof_score", 0) or 0),
+        "K-Means": float(case_row.get("kmeans_anomaly_score", 0) or 0),
+        "Graph Risk": float(case_row.get("graph_risk_score", 0) or 0),
+        "Amount Outlier": float(case_row.get("amount_outlier_risk", 0) or 0),
+        "Login Attempts": float(case_row.get("login_attempt_risk", 0) or 0),
+    }
+    ranked = sorted(component_map.items(), key=lambda item: item[1], reverse=True)
+    strongest = [f"{label} ({score:.3f})" for label, score in ranked if score > 0][:3]
+    return ", ".join(strongest) if strongest else "composite portfolio risk aggregation"
+
+
+def _find_matching_value(question: str, df: pd.DataFrame, column: str) -> Optional[str]:
+    if df.empty or column not in df.columns:
+        return None
+    question_lower = question.lower()
+    for value in df[column].dropna().astype(str).unique().tolist()[:1000]:
+        if value.lower() in question_lower:
+            return value
+    return None
+
+
 def generate_ai_recommendations(bundle: Dict[str, Any]) -> Dict[str, Any]:
     baseline = rule_based_recommendations(bundle)
     reminders = rule_based_reminders(bundle)
     response_text = request_ai_response(
         instructions=(
-            "You are a fraud analytics advisor preparing concise executive recommendations "
-            "for the Office of Oversight and Finance. Stay grounded in the supplied metrics. "
-            "Return 3 to 5 short bullet points only."
+            "You are a senior enterprise fraud strategy advisor supporting the Office of Oversight and Finance. "
+            "Use only the supplied evidence. Return 3 to 5 short bullets. Each bullet must include a priority, "
+            "the observed pattern, and the control action to take next."
         ),
         prompt=(
-            "Use the following grounded dataset context to produce executive monitoring recommendations.\n\n"
+            "Produce executive monitoring recommendations from this grounded dataset context.\n\n"
             f"{bundle_context_summary(bundle)}\n\n"
-            f"Existing deterministic observations: {baseline + reminders}"
+            f"Deterministic observations already found: {baseline + reminders}"
         ),
-        max_output_tokens=220,
+        max_output_tokens=260,
     )
     ai_bullets = [line.strip("- ").strip() for line in (response_text or "").splitlines() if line.strip()]
     return {
@@ -281,15 +410,16 @@ def explain_case(
         f"Entity type: {entity_type}\n"
         f"Case summary: {case_summary}\n\n"
         f"Dataset context:\n{bundle_context_summary(bundle)}\n\n"
-        "Provide a short business-facing explanation covering: what was flagged, why it looks suspicious, and what to review next."
+        "Explain what was flagged, which evidence supports the concern, and what the analyst should review next."
     )
     ai_text = request_ai_response(
         instructions=(
-            "You are a fraud investigator. Answer in 3 short sentences maximum. "
-            "Be specific, factual, and grounded in the data provided."
+            "You are a senior fraud investigator. Use only the supplied evidence. "
+            "Answer in three compact parts: finding, evidence, next review step. "
+            "If evidence is limited, say so explicitly."
         ),
         prompt=prompt,
-        max_output_tokens=180,
+        max_output_tokens=220,
     )
     return {
         "baseline": baseline,
@@ -302,15 +432,17 @@ def answer_data_question(question: str, bundle: Dict[str, Any]) -> Dict[str, Any
     heuristic_answer = heuristic_question_answer(question, bundle)
     ai_text = request_ai_response(
         instructions=(
-            "You are an executive fraud analytics assistant. Answer using only the supplied dataset context. "
-            "Be concise, business-facing, and avoid unsupported claims."
+            "You are an enterprise fraud analytics assistant. Answer using only the supplied dataset context. "
+            "Be precise, business-facing, and robust on edge cases. "
+            "Structure the answer as: direct answer, supporting evidence, recommended next step. "
+            "If the data does not support a conclusion, say so plainly."
         ),
         prompt=(
             f"Question: {question}\n\n"
             f"Dataset context:\n{bundle_context_summary(bundle)}\n\n"
-            f"Heuristic answer draft: {heuristic_answer}"
+            f"Deterministic grounded answer draft: {heuristic_answer}"
         ),
-        max_output_tokens=260,
+        max_output_tokens=320,
     )
     return {
         "heuristic_answer": heuristic_answer,
@@ -326,44 +458,115 @@ def heuristic_question_answer(question: str, bundle: Dict[str, Any]) -> str:
     accounts = bundle.get("accounts", pd.DataFrame())
     merchants = bundle.get("merchants", pd.DataFrame())
     locations = bundle.get("locations", pd.DataFrame())
+    devices = bundle.get("devices", pd.DataFrame())
+    summary = bundle.get("summary", {}) or {}
+    flagged = _flagged_transactions(transactions)
 
-    if "top 5 suspicious account" in question_lower or "riskiest account" in question_lower:
-        if isinstance(accounts, pd.DataFrame) and not accounts.empty:
-            top_accounts = accounts.head(5)[["accountid", "account_risk_score"]]
-            return "Top accounts by current risk score: " + ", ".join(
-                f"{row.accountid} ({row.account_risk_score:.3f})" for row in top_accounts.itertuples()
-            )
+    transaction_id = _find_matching_value(question, transactions, "transactionid")
+    if transaction_id:
+        tx = transactions.loc[transactions["transactionid"].astype(str) == str(transaction_id)].iloc[0]
+        return (
+            f"Transaction {transaction_id} is elevated at {float(tx.get('composite_risk_score', 0) or 0):.3f}. "
+            f"The strongest drivers are { _strongest_risk_components(tx) }. "
+            f"Review account {tx.get('accountid', 'N/A')}, merchant {tx.get('merchantid', 'N/A')}, and channel {tx.get('channel', 'N/A')} next."
+        )
+
+    if ("top" in question_lower or "riskiest" in question_lower) and "transaction" in question_lower and not transactions.empty:
+        top_transactions = transactions.head(5)[[column for column in ["transactionid", "accountid", "merchantid", "composite_risk_score"] if column in transactions.columns]]
+        return "Top suspicious transactions: " + ", ".join(
+            f"{row.transactionid} ({row.composite_risk_score:.3f})"
+            for row in top_transactions.itertuples()
+        )
+
+    if ("top 5 suspicious account" in question_lower or "riskiest account" in question_lower or "top account" in question_lower) and isinstance(accounts, pd.DataFrame) and not accounts.empty:
+        top_accounts = accounts.head(5)[["accountid", "account_risk_score"]]
+        return "Top accounts by current risk score: " + ", ".join(
+            f"{row.accountid} ({row.account_risk_score:.3f})" for row in top_accounts.itertuples()
+        )
 
     if "merchant" in question_lower and isinstance(merchants, pd.DataFrame) and not merchants.empty:
+        if "most often" in question_lower or "flagged" in question_lower:
+            merchant_counts = (
+                flagged.groupby("merchantid")
+                .agg(flagged_count=("transactionid", "count"), avg_risk_score=("composite_risk_score", "mean"))
+                .reset_index()
+                .sort_values(["flagged_count", "avg_risk_score"], ascending=False)
+            )
+            if not merchant_counts.empty:
+                top_merchants = merchant_counts.head(5)
+                return "Merchants appearing most often in flagged transactions: " + ", ".join(
+                    f"{row.merchantid} ({int(row.flagged_count)} flagged, avg risk {row.avg_risk_score:.3f})"
+                    for row in top_merchants.itertuples()
+                )
         top_merchants = merchants.head(5)[["merchantid", "avg_risk_score"]]
         return "Top merchants by average risk: " + ", ".join(
             f"{row.merchantid} ({row.avg_risk_score:.3f})" for row in top_merchants.itertuples()
         )
 
     if "location" in question_lower and isinstance(locations, pd.DataFrame) and not locations.empty:
-        top_location = locations.iloc[0]
+        if not flagged.empty and "location" in flagged.columns:
+            location_counts = (
+                flagged.groupby("location")
+                .agg(flagged_count=("transactionid", "count"), avg_risk_score=("composite_risk_score", "mean"))
+                .reset_index()
+                .sort_values(["flagged_count", "avg_risk_score"], ascending=False)
+            )
+            if not location_counts.empty:
+                top_location = location_counts.iloc[0]
+                return (
+                    f"{top_location['location']} has the most flagged activity with {int(top_location['flagged_count'])} flagged transactions "
+                    f"and average flagged risk {float(top_location['avg_risk_score']):.3f}."
+                )
+
+    if "device" in question_lower and isinstance(devices, pd.DataFrame) and not devices.empty:
+        top_device = devices.iloc[0]
         return (
-            f"{top_location['location']} currently has the highest location-level risk, "
-            f"with avg risk {top_location['avg_risk_score']:.3f}."
+            f"Device {top_device.get('deviceid', 'N/A')} currently leads the device-risk ranking with "
+            f"max risk {float(top_device.get('max_risk_score', 0) or 0):.3f}."
         )
 
-    if "device changes" in question_lower or "login attempts" in question_lower:
+    if "channel" in question_lower and not transactions.empty:
+        channel_table = summarize_channel_risk(transactions)
+        if not channel_table.empty:
+            top_channel = channel_table.iloc[0]
+            return (
+                f"{top_channel['channel']} is the highest-risk channel right now with average risk "
+                f"{float(top_channel['avg_risk_score']):.3f} across {int(top_channel['transaction_count'])} transactions."
+            )
+
+    if "device changes" in question_lower or "device change" in question_lower or "login attempts" in question_lower:
         signals = compute_feature_signal_summary(transactions)
         if signals:
             login_gap = signals.get("login_attempt_risk_flagged_mean", 0) - signals.get("login_attempt_risk_overall_mean", 0)
             device_gap = signals.get("device_change_flagged_mean", 0) - signals.get("device_change_flag_overall_mean", 0)
             if login_gap >= device_gap:
-                return "Repeated login attempts show the stronger association with flagged risk in the active dataset."
-            return "Device-change behavior shows the stronger association with flagged risk in the active dataset."
+                return (
+                    "Repeated login attempts show the stronger association with flagged risk in the active dataset. "
+                    f"Flagged mean login-attempt risk exceeds the portfolio baseline by {login_gap:.3f}."
+                )
+            return (
+                "Device-change behavior shows the stronger association with flagged risk in the active dataset. "
+                f"Flagged mean device-change signal exceeds the portfolio baseline by {device_gap:.3f}."
+            )
 
-    if "summarize" in question_lower or "pattern" in question_lower:
-        summary = bundle.get("summary", {}) or {}
+    if "recommendation" in question_lower or "oof" in question_lower or "control" in question_lower:
+        recommendations = rule_based_recommendations(bundle)
+        if recommendations:
+            return "Top recommendations: " + " | ".join(recommendations[:3])
+
+    if "summarize" in question_lower or "pattern" in question_lower or "overview" in question_lower:
+        channel_table = summarize_channel_risk(transactions)
+        top_channel = channel_table.iloc[0]["channel"] if not channel_table.empty else "the leading channel"
         return (
             f"The active dataset contains {summary.get('flagged_transactions', 0)} flagged transactions, "
-            f"{summary.get('high_risk_accounts', 0)} higher-risk accounts, and concentration in the highest-risk channel and entity clusters."
+            f"{summary.get('high_risk_accounts', 0)} higher-risk accounts, and concentrated exposure in {top_channel}. "
+            "The strongest recurring warning signs are the highest-risk entities and elevated access-pattern anomalies."
         )
 
-    return "Use the ranked transactions, accounts, merchants, and locations in the active dataset as the primary investigation starting points."
+    return (
+        f"The strongest investigation starting points are {summary.get('flagged_transactions', 0)} flagged transactions, "
+        f"{summary.get('high_risk_accounts', 0)} higher-risk accounts, and the top-ranked merchants, locations, and channels."
+    )
 
 
 def _baseline_case_explanation(entity_type: str, case_summary: Dict[str, Any]) -> str:

@@ -64,6 +64,19 @@ def inject_global_styles() -> None:
                 color: var(--brand-text);
             }}
 
+            div[data-testid="stAppViewContainer"] .main,
+            div[data-testid="stAppViewContainer"] .main p,
+            div[data-testid="stAppViewContainer"] .main li,
+            div[data-testid="stAppViewContainer"] .main label,
+            div[data-testid="stAppViewContainer"] .main span,
+            div[data-testid="stAppViewContainer"] .main div,
+            div[data-testid="stAppViewContainer"] .main h1,
+            div[data-testid="stAppViewContainer"] .main h2,
+            div[data-testid="stAppViewContainer"] .main h3,
+            div[data-testid="stAppViewContainer"] .main h4 {{
+                color: var(--brand-text);
+            }}
+
             body, p, li, label, span, div {{
                 color: inherit;
             }}
@@ -181,16 +194,26 @@ def inject_global_styles() -> None:
                 font-size: clamp(1.9rem, 3vw, 3rem);
                 font-weight: 800;
                 line-height: 1.08;
-                color: #ffffff;
+                color: #f6faf4 !important;
                 margin: 0;
+                text-shadow: 0 2px 14px rgba(0, 0, 0, 0.28);
             }}
 
             .hero-subtitle {{
-                color: rgba(240, 245, 241, 0.82);
+                color: rgba(244, 248, 245, 0.94) !important;
                 margin-top: 0.7rem;
                 max-width: 860px;
                 font-size: 1rem;
                 line-height: 1.6;
+                text-shadow: 0 1px 8px rgba(0, 0, 0, 0.16);
+            }}
+
+            .hero-card .hero-kicker,
+            .hero-card .hero-title,
+            .hero-card .hero-subtitle,
+            .hero-card .hero-logo-fallback,
+            .hero-card .hero-logo-fallback span {{
+                color: #f6faf4 !important;
             }}
 
             .hero-logo,
@@ -477,6 +500,21 @@ def inject_global_styles() -> None:
                 color: var(--brand-text) !important;
             }}
 
+            div[data-testid="stAppViewContainer"] .main .stRadio > label,
+            div[data-testid="stAppViewContainer"] .main .stFileUploader > label,
+            div[data-testid="stAppViewContainer"] .main .stTextArea > label,
+            div[data-testid="stAppViewContainer"] .main .stTextInput > label,
+            div[data-testid="stAppViewContainer"] .main .stSelectbox > label {{
+                color: #111715 !important;
+                font-weight: 700 !important;
+            }}
+
+            div[data-testid="stAppViewContainer"] .main .stRadio [data-testid="stMarkdownContainer"] p,
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] label p {{
+                color: #111715 !important;
+                font-weight: 600 !important;
+            }}
+
             .stSlider [data-baseweb="slider"] > div > div {{
                 background: var(--brand-green);
             }}
@@ -638,7 +676,8 @@ def apply_chart_theme(fig, height: Optional[int] = None):
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=18, r=18, t=56, b=18),
-        font=dict(color=BRAND["text"], family="Aptos, Segoe UI, sans-serif"),
+        font=dict(color="#111715", family="Aptos, Segoe UI, sans-serif"),
+        title_font=dict(color="#111715"),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -646,10 +685,30 @@ def apply_chart_theme(fig, height: Optional[int] = None):
             xanchor="right",
             x=1,
             bgcolor="rgba(255,255,255,0.72)",
+            font=dict(color="#111715"),
+            title=dict(font=dict(color="#111715")),
         ),
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(103, 115, 109, 0.16)", zeroline=False)
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(103, 115, 109, 0.12)", zeroline=False)
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="rgba(103, 115, 109, 0.16)",
+        zeroline=False,
+        title_font=dict(color="#111715"),
+        tickfont=dict(color="#111715"),
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="rgba(103, 115, 109, 0.12)",
+        zeroline=False,
+        title_font=dict(color="#111715"),
+        tickfont=dict(color="#111715"),
+    )
+    fig.update_coloraxes(
+        colorbar=dict(
+            title=dict(font=dict(color="#111715")),
+            tickfont=dict(color="#111715"),
+        )
+    )
     if height is not None:
         fig.update_layout(height=height)
     return fig

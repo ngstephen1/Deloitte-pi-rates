@@ -7,3 +7,4 @@ networkx==3.2
 streamlit==1.42.0
 scipy==1.11.4
 openai>=2.26.0
+certifi>=2024.2.2

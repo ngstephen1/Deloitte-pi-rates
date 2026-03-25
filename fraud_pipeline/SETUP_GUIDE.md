@@ -25,6 +25,11 @@ streamlit run app/streamlit_app.py
 
 The app will open in your browser at `http://localhost:8501`
 
+Important:
+- Use the project virtual environment, not the system Python install.
+- The macOS system interpreter on this machine has a broken `httpcore` / `litellm` stack that can interfere with OpenAI SDK imports.
+- The app now prefers direct HTTPS calls to the OpenAI Responses API, but the cleanest setup is still the isolated project venv above.
+
 ---
 
 ## Detailed Installation
@@ -55,6 +60,14 @@ venv\Scripts\activate
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+Optional but recommended for AI features:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+export OPENAI_MODEL="gpt-5-mini"
+export OPENAI_REASONING_EFFORT="medium"
 ```
 
 This installs:

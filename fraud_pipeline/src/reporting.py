@@ -26,6 +26,41 @@ from .utils import LOGGER, save_csv
 
 
 # ============================================================================
+# PLOTLY STYLING
+# ============================================================================
+
+def style_plotly_figure(fig):
+    fig.update_layout(
+        font=dict(color="#111715", family="Aptos, Segoe UI, sans-serif"),
+        title_font=dict(color="#111715"),
+        legend=dict(
+            font=dict(color="#111715"),
+            title=dict(font=dict(color="#111715")),
+            bgcolor="rgba(255,255,255,0.82)",
+        ),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+    )
+    fig.update_xaxes(
+        title_font=dict(color="#111715"),
+        tickfont=dict(color="#111715"),
+        gridcolor="rgba(103, 115, 109, 0.16)",
+    )
+    fig.update_yaxes(
+        title_font=dict(color="#111715"),
+        tickfont=dict(color="#111715"),
+        gridcolor="rgba(103, 115, 109, 0.12)",
+    )
+    fig.update_coloraxes(
+        colorbar=dict(
+            title=dict(font=dict(color="#111715")),
+            tickfont=dict(color="#111715"),
+        )
+    )
+    return fig
+
+
+# ============================================================================
 # OPENAI-BASED EXPLANATIONS (Optional)
 # ============================================================================
 
@@ -143,6 +178,7 @@ def plot_risk_by_account(risk_df: pd.DataFrame, accounts_df: pd.DataFrame, top_n
         height=600,
         hovermode="y unified",
     )
+    style_plotly_figure(fig)
     
     path = config.FIGURES_DIR / "risk_by_account.html"
     fig.write_html(str(path))
@@ -177,6 +213,7 @@ def plot_risk_by_merchant(risk_df: pd.DataFrame, merchants_df: pd.DataFrame, top
         height=600,
         hovermode="y unified",
     )
+    style_plotly_figure(fig)
     
     path = config.FIGURES_DIR / "risk_by_merchant.html"
     fig.write_html(str(path))
@@ -208,6 +245,7 @@ def plot_amount_vs_risk(risk_df: pd.DataFrame) -> Path:
     )
     
     fig.update_layout(hovermode="closest")
+    style_plotly_figure(fig)
     path = config.FIGURES_DIR / "amount_vs_risk_scatter.html"
     fig.write_html(str(path))
     LOGGER.info(f"  Saved: {path}")
@@ -229,6 +267,7 @@ def plot_risk_distribution(risk_df: pd.DataFrame) -> Path:
     )
     
     fig.update_xaxes(range=[0, 1])
+    style_plotly_figure(fig)
     path = config.FIGURES_DIR / "risk_distribution.html"
     fig.write_html(str(path))
     LOGGER.info(f"  Saved: {path}")
@@ -278,6 +317,7 @@ def plot_risk_components_breakdown(risk_df: pd.DataFrame) -> Path:
         yaxis_title="Transaction",
         height=800,
     )
+    style_plotly_figure(fig)
     
     path = config.FIGURES_DIR / "risk_components_heatmap.html"
     fig.write_html(str(path))
@@ -306,6 +346,7 @@ def plot_location_risk(risk_df: pd.DataFrame) -> Path:
         height=500,
         orientation="h",
     )
+    style_plotly_figure(fig)
     
     path = config.FIGURES_DIR / "risk_by_location.html"
     fig.write_html(str(path))
@@ -337,6 +378,7 @@ def plot_channel_risk(risk_df: pd.DataFrame) -> Path:
         yaxis_title="Average Risk Score",
         height=400,
     )
+    style_plotly_figure(fig)
     
     path = config.FIGURES_DIR / "risk_by_channel.html"
     fig.write_html(str(path))

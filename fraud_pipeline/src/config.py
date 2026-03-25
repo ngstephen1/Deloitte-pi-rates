@@ -137,12 +137,12 @@ USE_OPENAI_EXPLANATIONS = False  # Pipeline-time explanation generation
 # Streamlit AI assistant controls
 ENABLE_AI_FEATURES = True
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-OPENAI_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "medium")
+OPENAI_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "none")
 OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "https://api.openai.com/v1")
 OPENAI_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("OPENAI_REQUEST_TIMEOUT_SECONDS", "45"))
 OPENAI_TRANSPORT_PREFERENCE = os.environ.get("OPENAI_TRANSPORT_PREFERENCE", "http")
-AI_MAX_CONTEXT_ROWS = 12
-AI_MAX_OUTPUT_TOKENS = 450
+AI_MAX_CONTEXT_ROWS = 5
+AI_MAX_OUTPUT_TOKENS = 700
 
 # ============================================================================
 # LOGGING

@@ -44,8 +44,10 @@ def _build_response_payload(instructions: str, prompt: str, max_output_tokens: i
         "input": prompt,
         "max_output_tokens": max_output_tokens,
         "store": False,
+        "text": {"verbosity": "low"},
     }
-    if config.OPENAI_REASONING_EFFORT:
+    reasoning_effort = str(config.OPENAI_REASONING_EFFORT or "").strip().lower()
+    if reasoning_effort and reasoning_effort not in {"none", "default"}:
         payload["reasoning"] = {"effort": config.OPENAI_REASONING_EFFORT}
     return payload
 
@@ -72,8 +74,7 @@ def _extract_output_text(response_payload: Dict[str, Any]) -> Optional[str]:
     return "\n".join(fragments).strip() or None
 
 
-def _request_ai_response_http(instructions: str, prompt: str, max_output_tokens: int) -> Optional[str]:
-    payload = _build_response_payload(instructions, prompt, max_output_tokens)
+def _perform_http_request(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     ssl_context = None
     try:
         import certifi
@@ -99,7 +100,7 @@ def _request_ai_response_http(instructions: str, prompt: str, max_output_tokens:
             context=ssl_context,
         ) as response:
             body = response.read().decode("utf-8")
-        return _extract_output_text(json.loads(body))
+        return json.loads(body)
     except urllib.error.HTTPError as exc:
         try:
             error_body = exc.read().decode("utf-8")
@@ -108,6 +109,38 @@ def _request_ai_response_http(instructions: str, prompt: str, max_output_tokens:
         LOGGER.warning(f"AI HTTP request failed: status={exc.code}, body={error_body[:300]}")
     except Exception as exc:
         LOGGER.warning(f"AI HTTP transport failed: {exc}")
+    return None
+
+
+def _request_ai_response_http(instructions: str, prompt: str, max_output_tokens: int) -> Optional[str]:
+    payload = _build_response_payload(instructions, prompt, max_output_tokens)
+    response_payload = _perform_http_request(payload)
+    if not response_payload:
+        return None
+
+    output_text = _extract_output_text(response_payload)
+    if output_text:
+        return output_text
+
+    incomplete_reason = (
+        response_payload.get("incomplete_details", {}) or {}
+    ).get("reason")
+    if response_payload.get("status") == "incomplete" and incomplete_reason == "max_output_tokens":
+        retry_tokens = min(max(max_output_tokens * 2, 300), 1200)
+        retry_payload = _build_response_payload(instructions, prompt, retry_tokens)
+        retry_response_payload = _perform_http_request(retry_payload)
+        if retry_response_payload:
+            retry_output = _extract_output_text(retry_response_payload)
+            if retry_output:
+                return retry_output
+            LOGGER.debug(
+                "AI HTTP request remained incomplete after retry: "
+                f"reason={(retry_response_payload.get('incomplete_details', {}) or {}).get('reason')}"
+            )
+        return None
+
+    if response_payload.get("status") == "completed":
+        LOGGER.debug("AI HTTP request completed without extractable text output.")
     return None
 
 
@@ -144,7 +177,12 @@ def request_ai_response(
         return None
 
     transport_preference = str(config.OPENAI_TRANSPORT_PREFERENCE).lower()
-    transports = ["http", "sdk"] if transport_preference != "sdk" else ["sdk", "http"]
+    if transport_preference == "sdk":
+        transports = ["sdk", "http"]
+    elif transport_preference in {"auto", "both"}:
+        transports = ["http", "sdk"]
+    else:
+        transports = ["http"]
 
     for transport in transports:
         if transport == "http":
@@ -204,7 +242,11 @@ def _flagged_transactions(transactions: pd.DataFrame) -> pd.DataFrame:
     return flagged if not flagged.empty else transactions.copy()
 
 
-def bundle_context_summary(bundle: Dict[str, Any], max_rows: int = config.AI_MAX_CONTEXT_ROWS) -> str:
+def bundle_context_summary(
+    bundle: Dict[str, Any],
+    max_rows: int = config.AI_MAX_CONTEXT_ROWS,
+    detail: str = "compact",
+) -> str:
     """
     Build a compact, grounded context block from the active data bundle.
     """
@@ -231,40 +273,42 @@ def bundle_context_summary(bundle: Dict[str, Any], max_rows: int = config.AI_MAX
         ),
     ]
 
+    include_full_tables = detail == "full"
+    include_flagged_table = detail in {"compact", "full"}
+
     if not transactions.empty:
         risk_mix = transactions["risk_level"].value_counts().to_dict() if "risk_level" in transactions else {}
         context_blocks.append(f"Risk mix: {risk_mix}")
 
         transaction_columns = [
-            column
-            for column in [
+            column for column in [
                 "transactionid",
                 "accountid",
                 "merchantid",
                 "location",
-                "deviceid",
                 "channel",
                 "transactionamount",
                 "composite_risk_score",
                 "risk_level",
-            ]
-            if column in transactions.columns
+            ] if column in transactions.columns
         ]
-        top_transactions = transactions.head(max_rows)[transaction_columns]
-        if not top_transactions.empty:
-            context_blocks.append(f"Top transactions:\n{top_transactions.to_csv(index=False)}")
-
         top_flagged = flagged.head(max_rows)[transaction_columns]
-        if not top_flagged.empty:
+        if include_flagged_table and not top_flagged.empty:
             context_blocks.append(f"Flagged transactions:\n{top_flagged.to_csv(index=False)}")
 
         channel_table = summarize_channel_risk(transactions)
         if not channel_table.empty:
-            context_blocks.append(f"Channel risk:\n{channel_table.head(max_rows).to_csv(index=False)}")
+            limit = 1 if detail == "minimal" else min(max_rows, 3)
+            context_blocks.append(f"Channel risk:\n{channel_table.head(limit).to_csv(index=False)}")
 
         feature_signals = compute_feature_signal_summary(transactions)
         if feature_signals:
             context_blocks.append(f"Signal summary: {feature_signals}")
+
+        if include_full_tables:
+            top_transactions = transactions.head(max_rows)[transaction_columns]
+            if not top_transactions.empty:
+                context_blocks.append(f"Top transactions:\n{top_transactions.to_csv(index=False)}")
 
     for label, df, columns in [
         ("Top accounts", accounts, ["accountid", "account_risk_score", "transaction_count", "high_risk_transaction_count"]),
@@ -272,7 +316,8 @@ def bundle_context_summary(bundle: Dict[str, Any], max_rows: int = config.AI_MAX
         ("Top devices", devices, ["deviceid", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"]),
         ("Top locations", locations, ["location", "avg_risk_score", "max_risk_score", "transaction_count", "high_risk_count"]),
     ]:
-        table = _top_entity_rows(df, columns, max_rows)
+        entity_limit = 1 if detail == "minimal" else min(max_rows, 3)
+        table = _top_entity_rows(df, columns, entity_limit)
         if table:
             context_blocks.append(f"{label}:\n{table}")
 
@@ -384,7 +429,7 @@ def generate_ai_recommendations(bundle: Dict[str, Any]) -> Dict[str, Any]:
         ),
         prompt=(
             "Produce executive monitoring recommendations from this grounded dataset context.\n\n"
-            f"{bundle_context_summary(bundle)}\n\n"
+            f"{bundle_context_summary(bundle, detail='minimal')}\n\n"
             f"Deterministic observations already found: {baseline + reminders}"
         ),
         max_output_tokens=260,
@@ -409,7 +454,7 @@ def explain_case(
     prompt = (
         f"Entity type: {entity_type}\n"
         f"Case summary: {case_summary}\n\n"
-        f"Dataset context:\n{bundle_context_summary(bundle)}\n\n"
+        f"Dataset context:\n{bundle_context_summary(bundle, detail='minimal')}\n\n"
         "Explain what was flagged, which evidence supports the concern, and what the analyst should review next."
     )
     ai_text = request_ai_response(
@@ -439,7 +484,7 @@ def answer_data_question(question: str, bundle: Dict[str, Any]) -> Dict[str, Any
         ),
         prompt=(
             f"Question: {question}\n\n"
-            f"Dataset context:\n{bundle_context_summary(bundle)}\n\n"
+            f"Dataset context:\n{bundle_context_summary(bundle, detail='compact')}\n\n"
             f"Deterministic grounded answer draft: {heuristic_answer}"
         ),
         max_output_tokens=320,

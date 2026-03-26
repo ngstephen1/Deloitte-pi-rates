@@ -51,3 +51,8 @@ outputs/
 Deloitte-pi-rates/.env
 /.env
 .env
+
+# Zone Identifier
+bank_transactions_data_2.csv:Zone.Identifier
+creditcard.csv:Zone.Identifier
+creditcard.csv.zip:Zone.Identifier

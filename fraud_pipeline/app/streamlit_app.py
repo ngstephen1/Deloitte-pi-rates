@@ -204,13 +204,62 @@ def load_pipeline_outputs() -> Dict[str, Any]:
     return bundle
 
 
+@st.cache_data
+def load_demo_bundle_from_raw() -> Dict[str, Any]:
+    raw_path = config.RAW_DATA_FILE
+    if not raw_path.exists():
+        raise FileNotFoundError(raw_path)
+    raw_df = pd.read_csv(raw_path)
+    bundle = bundle_from_uploaded_csv(
+        raw_df,
+        "Raw transaction dataset",
+        f"Bundled demo dataset: {raw_path.name}",
+    )
+    bundle["source_label"] = f"Bundled demo dataset: {raw_path.name}"
+    bundle["uploaded_type"] = "bundled_raw_demo"
+    return bundle
+
+
+def empty_bundle(source_label: str = "No active dataset") -> Dict[str, Any]:
+    return {
+        "transactions": pd.DataFrame(),
+        "accounts": pd.DataFrame(),
+        "merchants": pd.DataFrame(),
+        "devices": pd.DataFrame(),
+        "ips": pd.DataFrame(),
+        "locations": pd.DataFrame(),
+        "summary": {},
+        "review_log": pd.DataFrame(),
+        "explanations": {},
+        "source_label": source_label,
+        "uploaded_type": "empty",
+    }
+
+
 def get_active_bundle() -> Dict[str, Any]:
+    uploaded_bundle = st.session_state.get("uploaded_bundle")
+    if uploaded_bundle:
+        return uploaded_bundle
+
     try:
-        return st.session_state.get("uploaded_bundle") or load_pipeline_outputs()
-    except FileNotFoundError as exc:
-        st.error(f"Pipeline output missing: {exc}")
-        st.info("Run `python3 run_pipeline.py` from `fraud_pipeline/` before opening the dashboard.")
-        st.stop()
+        return load_pipeline_outputs()
+    except FileNotFoundError:
+        pass
+
+    try:
+        with st.spinner("Preparing bundled demo dataset..."):
+            bundle = load_demo_bundle_from_raw()
+        st.caption(
+            "Pipeline reports were not found, so the dashboard loaded the bundled demo dataset directly from the raw sample file."
+        )
+        return bundle
+    except FileNotFoundError:
+        st.warning("No generated reports or bundled raw sample dataset were found. Upload a CSV in the Upload Data tab to begin.")
+        return empty_bundle("Awaiting upload")
+    except Exception as exc:
+        st.warning(f"Automatic demo-data preparation failed: {exc}")
+        st.info("You can still upload a CSV in the Upload Data tab and run the analysis interactively.")
+        return empty_bundle("Awaiting upload")
 
 
 def current_source_label(bundle: Dict[str, Any]) -> str:

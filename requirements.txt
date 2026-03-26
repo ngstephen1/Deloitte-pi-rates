@@ -1,14 +1,1 @@
-streamlit>=1.42.0
-pandas>=2.2.0
-numpy>=1.24.3
-scikit-learn>=1.3.2
-matplotlib>=3.8.2
-plotly>=5.18.0
-networkx>=3.2
-scipy>=1.11.4
-kmapper>=2.1.0
-giotto-ph>=0.2.4
-openai>=2.26.0
-certifi>=2024.2.2
-python-dotenv>=1.0.1
-discord.py>=2.4.0
+-r fraud_pipeline/app/requirements.txt

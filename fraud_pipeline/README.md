@@ -116,6 +116,32 @@ python3 -m streamlit run app/streamlit_app.py
 #  - Publish the active fraud context for Discord/OpenClaw and optionally send report digests or alerts
 ```
 
+### 4b. Deploy To Streamlit Community Cloud
+
+For Streamlit Cloud, point the app file to:
+
+```text
+fraud_pipeline/app/streamlit_app.py
+```
+
+Dependency notes:
+
+- The repo root `requirements.txt` is now deployment-oriented and installs `fraud_pipeline/app/requirements.txt`.
+- `fraud_pipeline/app/requirements.txt` contains the dashboard/runtime dependencies only.
+- `fraud_pipeline/requirements.txt` remains the full local stack for backend runs, ChatOps, and the Discord bot.
+
+Startup behavior:
+
+- If generated files already exist under `fraud_pipeline/outputs/reports/`, the app uses them.
+- If those outputs are missing in deployment, the app now falls back to the bundled raw sample dataset and prepares an in-memory demo bundle automatically.
+- If you want AI features in Cloud, add `OPENAI_API_KEY` in Streamlit Secrets.
+
+Recommended Streamlit Cloud settings:
+
+- Python version: `3.11`
+- App path: `fraud_pipeline/app/streamlit_app.py`
+- Secrets: only the keys you actually want enabled in deployment; avoid Discord bot credentials unless you explicitly want Cloud to call external ChatOps endpoints.
+
 ### 5. Upload CSV Files Directly In Streamlit
 
 Inside the app:

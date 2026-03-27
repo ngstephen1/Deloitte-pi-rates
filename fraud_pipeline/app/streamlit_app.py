@@ -52,6 +52,7 @@ from src.dashboard_data import (
     CSV_UPLOAD_OPTIONS,
     bundle_from_transactions,
     bundle_from_uploaded_csv,
+    infer_uploaded_csv_type,
     validate_uploaded_csv,
 )
 from src.review_store import ReviewStore
@@ -437,6 +438,115 @@ def display_dataframe(df: pd.DataFrame, formatters: dict | None = None, height: 
             if column in view.columns:
                 view[column] = view[column].map(lambda value: formatter(value) if pd.notna(value) else "N/A")
     st.dataframe(view, use_container_width=True, hide_index=True, height=height)
+
+
+def build_upload_reference_signals(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+
+    working = df.copy()
+    numeric_cols = [
+        column
+        for column in ["transactionamount", "accountbalance", "transactionduration", "loginattempts", "customerage"]
+        if column in working.columns and pd.api.types.is_numeric_dtype(working[column])
+    ]
+    if not numeric_cols:
+        return pd.DataFrame()
+
+    working["iqr_outlier_score"] = 0
+    working["iqr_reason"] = ""
+
+    for column in numeric_cols:
+        q1 = working[column].quantile(0.25)
+        q3 = working[column].quantile(0.75)
+        iqr = q3 - q1
+        if pd.isna(iqr) or iqr == 0:
+            continue
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        low_mask = working[column] < lower
+        high_mask = working[column] > upper
+        working["iqr_outlier_score"] += (low_mask | high_mask).astype(int)
+        working.loc[low_mask, "iqr_reason"] += f"{column} low; "
+        working.loc[high_mask, "iqr_reason"] += f"{column} high; "
+
+    if working["iqr_outlier_score"].max() == 0:
+        working["iqr_fraud_likelihood"] = 0.0
+    else:
+        working["iqr_fraud_likelihood"] = working["iqr_outlier_score"] / max(len(numeric_cols), 1)
+
+    working["iqr_reason"] = working["iqr_reason"].str.strip().str.rstrip(";")
+    return working
+
+
+def render_upload_reference_insights(upload_type: str, normalized_df: pd.DataFrame) -> None:
+    if upload_type != "Raw transaction dataset":
+        return
+
+    exploratory = build_upload_reference_signals(normalized_df)
+    if exploratory.empty:
+        return
+
+    render_section_header(
+        "Exploratory Risk Signals",
+        "Notebook-inspired reference checks highlight multivariate IQR outliers before the full pipeline ranking is applied.",
+        kicker="Reference View",
+    )
+
+    high_signal_count = int((exploratory["iqr_fraud_likelihood"] >= 0.4).sum()) if "iqr_fraud_likelihood" in exploratory else 0
+    top_reasoned = exploratory[exploratory["iqr_outlier_score"] > 0].copy()
+    sort_columns = [column for column in ["iqr_fraud_likelihood", "transactionamount"] if column in top_reasoned.columns]
+    if sort_columns:
+        top_reasoned = top_reasoned.sort_values(sort_columns, ascending=False)
+
+    metric_cols = st.columns(3)
+    with metric_cols[0]:
+        render_metric_card("IQR Flagged Rows", f"{high_signal_count:,}", "Rows with elevated reference risk")
+    with metric_cols[1]:
+        peak_score = float(exploratory["iqr_fraud_likelihood"].max()) if "iqr_fraud_likelihood" in exploratory else 0.0
+        render_metric_card("Peak Reference Score", f"{peak_score:.2f}", "Highest notebook-style IQR signal")
+    with metric_cols[2]:
+        flagged_share = float((exploratory["iqr_outlier_score"] > 0).mean() * 100) if "iqr_outlier_score" in exploratory else 0.0
+        render_metric_card("Rows With Outlier Reasons", f"{flagged_share:.1f}%", "Rows carrying at least one IQR outlier reason")
+
+    if {"transactionamount", "transactionduration", "iqr_fraud_likelihood"}.issubset(exploratory.columns):
+        fig = px.scatter(
+            exploratory,
+            x="transactionamount",
+            y="transactionduration",
+            color="iqr_fraud_likelihood",
+            color_continuous_scale=["#EAF5D2", "#86BC25", "#C23B32"],
+            hover_data={
+                "transactionid": "transactionid" in exploratory.columns,
+                "accountid": "accountid" in exploratory.columns,
+                "iqr_reason": True,
+                "iqr_outlier_score": True,
+            },
+            labels={
+                "transactionamount": "Transaction Amount",
+                "transactionduration": "Transaction Duration",
+                "iqr_fraud_likelihood": "IQR Risk Signal",
+            },
+            title="Amount vs Duration Reference Risk View",
+        )
+        apply_chart_theme(fig)
+        st.plotly_chart(fig, use_container_width=True)
+
+    if not top_reasoned.empty:
+        display_columns = [
+            column
+            for column in ["transactionid", "accountid", "transactionamount", "transactionduration", "iqr_fraud_likelihood", "iqr_reason"]
+            if column in top_reasoned.columns
+        ]
+        render_detail_card("Top Reference Outlier Reasons", "Useful as a quick triage hint before the full fraud ranking is loaded.")
+        display_dataframe(
+            top_reasoned[display_columns].head(12),
+            formatters={
+                "transactionamount": format_currency,
+                "iqr_fraud_likelihood": format_score,
+            },
+            height=320,
+        )
 
 
 def render_case_explanation(entity_type: str, case_summary: Dict[str, Any], bundle: Dict[str, Any], case_key: str) -> None:
@@ -1001,25 +1111,22 @@ def page_upload_data() -> None:
                 unsafe_allow_html=True,
             )
 
-    upload_type = st.radio(
-        "CSV Type",
-        options=CSV_UPLOAD_OPTIONS,
-        index=None,
-        horizontal=True,
-        key="upload_csv_type",
-    )
-
-    if not upload_type:
-        st.info("Choose one CSV type first. The file uploader appears after the selection is made.")
-        return
-
-    uploaded_file = st.file_uploader("Upload CSV", type=["csv"], key=f"uploader_{upload_type}")
+    uploaded_file = st.file_uploader("Upload CSV", type=["csv"], key="upload_csv_any_type")
 
     if uploaded_file is None:
-        st.info("Upload a CSV after choosing the dataset type.")
+        st.info("Drag and drop a CSV to begin. The dashboard will detect the most likely dataset type automatically.")
         return
 
     raw_df = read_uploaded_csv(uploaded_file)
+    inference = infer_uploaded_csv_type(raw_df)
+    inferred_type = inference["inferred_type"]
+    inferred_index = CSV_UPLOAD_OPTIONS.index(inferred_type) if inferred_type in CSV_UPLOAD_OPTIONS else 0
+    upload_type = st.selectbox(
+        "Detected CSV Type",
+        options=CSV_UPLOAD_OPTIONS,
+        index=inferred_index,
+        help="The app preselects the most likely file type. Override it if needed before processing.",
+    )
     validation = validate_uploaded_csv(raw_df, upload_type)
     normalized_df = validation["normalized_df"]
 
@@ -1029,7 +1136,8 @@ def page_upload_data() -> None:
         <div class="insight-card">
             <strong>Dataset summary</strong><br>
             File name: {uploaded_file.name}<br>
-            Selected type: {upload_type}<br>
+            Detected type: {inferred_type}<br>
+            Active type: {upload_type}<br>
             Row count: {len(normalized_df):,}<br>
             Detected columns: {len(normalized_df.columns):,}
         </div>
@@ -1039,6 +1147,7 @@ def page_upload_data() -> None:
     st.write("Detected columns")
     st.code(", ".join(normalized_df.columns.tolist()) or "(none)")
     render_upload_validation(validation, upload_type)
+    render_upload_reference_insights(upload_type, normalized_df)
 
     render_section_header(
         "Preview",
@@ -1262,7 +1371,7 @@ def page_transactions(bundle: Dict[str, Any]) -> None:
     render_insight(
         f"<strong>{judge_label}</strong><br>"
         f"Suggested disposition: {badge(review_judgment['decision'])}"
-        f"<span style='margin-left:0.6rem; color:{BRAND['text_muted']}; font-weight:700; text-transform:uppercase; letter-spacing:0.12em;'>"
+        f"<span style='margin-left:0.6rem; color:{BRAND['muted']}; font-weight:700; text-transform:uppercase; letter-spacing:0.12em;'>"
         f"{review_judgment.get('confidence', 'medium')} confidence</span><br>"
         f"{review_judgment.get('rationale', 'No rationale available.')}<br><br>"
         f"<strong>Reviewer checks</strong><br>{judge_checks or '- Validate the case against linked entities before saving the final disposition.'}"

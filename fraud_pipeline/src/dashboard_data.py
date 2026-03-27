@@ -71,6 +71,47 @@ def validate_uploaded_csv(df: pd.DataFrame, csv_type: str) -> Dict[str, Any]:
     }
 
 
+def infer_uploaded_csv_type(df: pd.DataFrame) -> Dict[str, Any]:
+    normalized = normalize_uploaded_columns(df)
+    candidates: List[Dict[str, Any]] = []
+
+    for csv_type in CSV_UPLOAD_OPTIONS:
+        expected = CSV_TYPE_EXPECTATIONS.get(csv_type, [])
+        present = [column for column in expected if column in normalized.columns]
+        missing = [column for column in expected if column not in normalized.columns]
+        score = (len(present) / len(expected)) if expected else 0.0
+        candidates.append(
+            {
+                "csv_type": csv_type,
+                "expected_columns": expected,
+                "present_columns": present,
+                "missing_columns": missing,
+                "is_valid": len(missing) == 0,
+                "match_score": score,
+            }
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            item["is_valid"],
+            item["match_score"],
+            -len(item["missing_columns"]),
+        ),
+        reverse=True,
+    )
+
+    top_candidate = candidates[0] if candidates else None
+    second_score = candidates[1]["match_score"] if len(candidates) > 1 else 0.0
+    confidence_gap = (top_candidate["match_score"] - second_score) if top_candidate else 0.0
+
+    return {
+        "normalized_df": normalized,
+        "inferred_type": top_candidate["csv_type"] if top_candidate else CSV_UPLOAD_OPTIONS[0],
+        "candidates": candidates,
+        "is_confident": bool(top_candidate and (top_candidate["is_valid"] or confidence_gap >= 0.20)),
+    }
+
+
 def build_entity_summary(transactions: pd.DataFrame, entity_col: str) -> pd.DataFrame:
     if transactions.empty or entity_col not in transactions.columns:
         return pd.DataFrame()

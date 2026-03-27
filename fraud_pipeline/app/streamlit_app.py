@@ -339,6 +339,14 @@ def sync_question_to_chatops(
     return {"manifest": manifest, **result}
 
 
+def qna_status_note(response: Dict[str, Any]) -> str:
+    if response.get("ai_answer"):
+        return "AI response returned successfully."
+    if not response.get("ai_available"):
+        return response.get("availability_message") or "AI is currently unavailable."
+    return "AI request did not return usable text for this run, so the app used a grounded fallback answer."
+
+
 def bundle_signature(bundle: Dict[str, Any]) -> str:
     context = bundle_context_summary(bundle)
     return hashlib.md5(context.encode("utf-8")).hexdigest()
@@ -730,6 +738,7 @@ def render_inline_ai_guidance(bundle: Dict[str, Any], prefix: str = "upload") ->
                 "question": question.strip(),
                 "answer": answer_text,
                 "used_ai": bool(response["ai_answer"]),
+                "status_note": qna_status_note(response),
             }
         )
         qna_sync = sync_question_to_chatops(
@@ -745,6 +754,10 @@ def render_inline_ai_guidance(bundle: Dict[str, Any], prefix: str = "upload") ->
     if history:
         for item in reversed(history):
             render_insight(f"<strong>Question</strong><br>{item['question']}")
+            render_insight(
+                f"<strong>AI Status</strong><br>{'AI used' if item['used_ai'] else 'Fallback used'}"
+                f"<br><span style='color:{BRAND['muted']};'>{item.get('status_note', '')}</span>"
+            )
             render_insight(f"<strong>Answer</strong><br>{item['answer']}")
     else:
         st.info("Ask a question after processing a valid CSV to open a live investigation thread.")
@@ -954,6 +967,7 @@ def page_overview(bundle: Dict[str, Any]) -> None:
 
 
 def page_upload_data() -> None:
+    st.markdown('<div class="upload-page-marker"></div>', unsafe_allow_html=True)
     render_section_header(
         "Upload Data",
         "Choose one of the approved CSV presets first, then upload and validate the file before the dashboard processes it.",
@@ -1420,6 +1434,7 @@ def page_questions(bundle: Dict[str, Any]) -> None:
                 "question": question.strip(),
                 "answer": answer_text,
                 "used_ai": bool(response["ai_answer"]),
+                "status_note": qna_status_note(response),
             }
         )
         qna_sync = sync_question_to_chatops(
@@ -1441,6 +1456,10 @@ def page_questions(bundle: Dict[str, Any]) -> None:
             <div class="detail-card" style="margin-bottom:0.9rem;">
                 <div class="detail-label">Question</div>
                 <div class="detail-value" style="font-size:1rem;">{item['question']}</div>
+                <div class="detail-label" style="margin-top:0.9rem;">AI Status</div>
+                <div style="margin-top:0.35rem; color:{BRAND['muted']}; line-height:1.55;">
+                    {'AI used' if item['used_ai'] else 'Fallback used'}<br>{item.get('status_note', '')}
+                </div>
                 <div class="detail-label" style="margin-top:0.9rem;">Answer</div>
                 <div style="margin-top:0.35rem; color:{BRAND['text']}; line-height:1.6;">{item['answer']}</div>
             </div>

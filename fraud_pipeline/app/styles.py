@@ -484,7 +484,8 @@ def inject_global_styles() -> None:
             }}
 
             .stButton > button,
-            .stDownloadButton > button {{
+            .stDownloadButton > button,
+            .stFileUploader button {{
                 background: linear-gradient(135deg, var(--brand-green) 0%, #9bd238 100%);
                 color: #111715;
                 border: none;
@@ -495,12 +496,16 @@ def inject_global_styles() -> None:
             }}
 
             .stButton > button:hover,
-            .stDownloadButton > button:hover {{
+            .stDownloadButton > button:hover,
+            .stFileUploader button:hover {{
                 background: linear-gradient(135deg, #93cc30 0%, #abd95a 100%);
             }}
 
             .stButton > button p,
-            .stDownloadButton > button p {{
+            .stDownloadButton > button p,
+            .stFileUploader button p,
+            .stFileUploader button span,
+            .stFileUploader button div {{
                 color: #111715 !important;
                 font-weight: 800 !important;
             }}
@@ -539,9 +544,31 @@ def inject_global_styles() -> None:
             }}
 
             div[data-testid="stAppViewContainer"] .main .stRadio [data-testid="stMarkdownContainer"] p,
-            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] label p {{
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] label p,
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] label,
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] label span,
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] label div {{
                 color: #111715 !important;
+                fill: #111715 !important;
                 font-weight: 600 !important;
+                background: transparent !important;
+            }}
+
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] label *,
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] [data-baseweb="radio"] *,
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] [data-baseweb="radio"] label *,
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] [data-baseweb="radio"] div *,
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] [data-baseweb="radio"] span * {{
+                color: #111715 !important;
+                fill: #111715 !important;
+            }}
+
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] label::selection,
+            div[data-testid="stAppViewContainer"] .main .stRadio div[role="radiogroup"] label *::selection,
+            div[data-testid="stAppViewContainer"] .main .stRadio > label::selection,
+            div[data-testid="stAppViewContainer"] .main .stRadio > label *::selection {{
+                color: #111715 !important;
+                background: rgba(134, 188, 37, 0.12) !important;
             }}
 
             .stSlider [data-baseweb="slider"] > div > div {{
@@ -556,6 +583,66 @@ def inject_global_styles() -> None:
             .stAlert p,
             .stAlert div {{
                 color: var(--brand-text) !important;
+            }}
+
+            .stFileUploader section,
+            .stFileUploader section small,
+            .stFileUploader section span,
+            .stFileUploader section div,
+            .stFileUploader [data-testid="stFileUploaderDropzone"],
+            .stFileUploader [data-testid="stFileUploaderDropzone"] small,
+            .stFileUploader [data-testid="stFileUploaderDropzone"] span,
+            .stFileUploader [data-testid="stFileUploaderDropzone"] div {{
+                color: #111715 !important;
+            }}
+
+            .stFileUploader [data-testid="stFileUploaderDropzone"] {{
+                background: rgba(255,255,255,0.92) !important;
+                border: 1px solid rgba(27,31,30,0.12) !important;
+            }}
+
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stRadio > label,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stFileUploader > label,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stAlert,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stAlert *,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stButton > button,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stButton > button *,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stFileUploader,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stFileUploader *,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stRadio,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stRadio *,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) p,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) label,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) span,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) div {{
+                color: #111715 !important;
+                fill: #111715 !important;
+            }}
+
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stRadio,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stRadio *,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stFileUploader,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stFileUploader *,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stButton > button,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stButton > button * {{
+                -webkit-user-select: none !important;
+                user-select: none !important;
+            }}
+
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stRadio *::selection,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stFileUploader *::selection,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stButton > button *::selection,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) p::selection,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) label::selection,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) span::selection,
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) div::selection {{
+                color: #111715 !important;
+                background: transparent !important;
+            }}
+
+            div[data-testid="stAppViewContainer"] .main .block-container:has(.upload-page-marker) .stFileUploader [data-testid="stFileUploaderDropzone"] {{
+                background: rgba(255,255,255,0.94) !important;
+                border: 1px solid rgba(27,31,30,0.12) !important;
             }}
 
             [data-testid="stDataFrame"] {{
